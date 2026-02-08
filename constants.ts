@@ -38,7 +38,7 @@ export const MOCK_STUDENTS: User[] = [
   {
     id: '1',
     name: 'Артём Волков',
-    avatar: 'https://picsum.photos/seed/artem/200',
+    avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=artem',
     role: UserRole.STUDENT,
     level: 5,
     xp: 450,
@@ -57,7 +57,7 @@ export const MOCK_STUDENTS: User[] = [
   {
     id: '2',
     name: 'Марина Козлова',
-    avatar: 'https://picsum.photos/seed/marina/200',
+    avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=marina',
     role: UserRole.STUDENT,
     level: 3,
     xp: 120,
@@ -74,7 +74,7 @@ export const MOCK_STUDENTS: User[] = [
   {
     id: '3',
     name: 'Дмитрий Савицкий',
-    avatar: 'https://picsum.photos/seed/dima/200',
+    avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=dima',
     role: UserRole.STUDENT,
     level: 4,
     xp: 800,
@@ -91,7 +91,7 @@ export const MOCK_STUDENTS: User[] = [
   {
     id: '4',
     name: 'Ольга Бондарь',
-    avatar: 'https://picsum.photos/seed/olga/200',
+    avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=olga',
     role: UserRole.STUDENT,
     level: 6,
     xp: 200,
@@ -108,7 +108,7 @@ export const MOCK_STUDENTS: User[] = [
   {
     id: '7',
     name: 'Илья Кравченко',
-    avatar: 'https://picsum.photos/seed/ilya/200',
+    avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=ilya',
     role: UserRole.STUDENT,
     level: 5,
     xp: 150,

@@ -14,7 +14,7 @@ interface LayoutProps {
 
 const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange, userRole, title, onBack }) => {
   return (
-    <div className="flex flex-col min-h-screen bg-[#efeff4] relative">
+    <div className="flex flex-col min-h-screen bg-[#f5f5f5] relative text-[#1a1a1a]">
       <header className="ios-header">
         <div className="h-11 flex items-center justify-between px-4">
           <div className="w-20">
@@ -26,7 +26,7 @@ const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange, userR
             )}
           </div>
           <div className="flex-1 text-center truncate">
-            <h1 className="font-semibold text-[17px]">
+            <h1 className="font-semibold text-[17px] text-[#1a1a1a]">
               {title || (activeTab === 'dashboard' ? 'VolleyLevel' : 
                          activeTab === 'skills' ? 'Навыки' : 
                          activeTab === 'leaderboard' ? 'Рейтинг' : 
@@ -34,7 +34,7 @@ const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange, userR
             </h1>
           </div>
           <div className="w-20 text-right">
-             <span className="text-[10px] font-bold text-[#8e8e93] uppercase">
+             <span className="text-[10px] font-bold text-[#6b7280] uppercase">
                {userRole === UserRole.TRAINER ? 'Coach' : userRole === UserRole.ADMIN ? 'Admin' : 'Player'}
              </span>
           </div>

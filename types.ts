@@ -21,14 +21,23 @@ export interface TrainingRecord {
   qrId?: string;
 }
 
+export interface QRSkill {
+  skillId: string;
+  xpAmount: number;
+}
+
 export interface QRCodeDefinition {
   id: string;
   title: string;
   branch: string;
   city: string;
   xpAmount: number;
-  skillId?: string; // Если пусто, то общий опыт
+  skillId?: string; // Если пусто, то общий опыт (legacy)
+  skills?: QRSkill[]; // Несколько навыков для пресетов тренировок
   achievementId?: string; // Опционально: разблокировка ачивки
+  isTrainingPreset?: boolean; // QR для тренировки
+  maxUses?: number; // Максимальное количество сканирований
+  usesCount?: number; // Текущее количество сканирований
   createdAt: string;
   expiresAt?: string;
 }
