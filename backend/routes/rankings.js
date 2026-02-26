@@ -9,7 +9,7 @@ router.get('/players', (req, res) => {
     SELECT 
       u.id, u.name, u.avatar, u.level, u.total_xp, u.city, u.branch, u.streak
     FROM users u
-    WHERE u.role = 'STUDENT'
+    WHERE u.role = 'STUDENT' AND u.trainings_completed > 0
   `;
   const params = [];
 
@@ -52,7 +52,7 @@ router.get('/branches', (req, res) => {
       SUM(u.total_xp) as total_xp,
       AVG(u.total_xp) as avg_xp
     FROM users u
-    WHERE u.role = 'STUDENT'
+    WHERE u.role = 'STUDENT' AND u.trainings_completed > 0
   `;
   const params = [];
 
@@ -85,7 +85,7 @@ router.get('/cities', (req, res) => {
       AVG(u.total_xp) as avg_xp,
       COUNT(DISTINCT u.branch) as branch_count
     FROM users u
-    WHERE u.role = 'STUDENT'
+    WHERE u.role = 'STUDENT' AND u.trainings_completed > 0
     GROUP BY u.city
     ORDER BY total_xp DESC
   `).all();
@@ -111,7 +111,7 @@ router.get('/skills/:skillId', (req, res) => {
       us.value as skill_value
     FROM users u
     JOIN user_skills us ON u.id = us.user_id
-    WHERE us.skill_id = ? AND u.role = 'STUDENT'
+    WHERE us.skill_id = ? AND u.role = 'STUDENT' AND u.trainings_completed > 0
     ORDER BY us.value DESC
     LIMIT ?
   `).all(skillId, parseInt(limit));
@@ -136,7 +136,7 @@ router.get('/streaks', (req, res) => {
     SELECT 
       id, name, avatar, level, city, branch, streak
     FROM users
-    WHERE role = 'STUDENT' AND streak > 0
+    WHERE role = 'STUDENT' AND streak > 0 AND trainings_completed > 0
     ORDER BY streak DESC
     LIMIT ?
   `).all(parseInt(limit));

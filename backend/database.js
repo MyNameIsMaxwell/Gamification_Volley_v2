@@ -201,6 +201,22 @@ async function initDatabase() {
     );
   `);
 
+  // Migration: add operator_id and reason columns to training_history
+  try {
+    db.exec(`ALTER TABLE training_history ADD COLUMN operator_id INTEGER REFERENCES users(id)`);
+  } catch (e) { /* column already exists */ }
+  try {
+    db.exec(`ALTER TABLE training_history ADD COLUMN reason TEXT`);
+  } catch (e) { /* column already exists */ }
+
+  // Migration: add assigned_city and assigned_branch for trainers
+  try {
+    db.exec(`ALTER TABLE users ADD COLUMN assigned_city TEXT`);
+  } catch (e) { /* column already exists */ }
+  try {
+    db.exec(`ALTER TABLE users ADD COLUMN assigned_branch TEXT`);
+  } catch (e) { /* column already exists */ }
+
   // Insert default skills if not exist
   const defaultSkills = [
     { id: 'serve', label: 'Подача' },

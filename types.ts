@@ -60,6 +60,21 @@ export interface User {
   streak: number;
   lastTrainingDate?: string;
   lastQRScanDate?: string; // Дата последнего сканирования для лимита 1 раз в день
+  assignedCity?: string | null; // Закрепленный город для тренера
+  assignedBranch?: string | null; // Закрепленный филиал для тренера
+}
+
+export interface XpHistoryEntry {
+  id: number;
+  date: string;
+  skillFocus: string;
+  xpEarned: number;
+  source: string; // 'xp_bonus' | 'xp_deduction' | 'training' | 'preset' | 'qr' | 'manual'
+  qrId?: string;
+  operatorId?: number;
+  operatorName?: string;
+  reason?: string;
+  createdAt: string;
 }
 
 export interface AchievementConditions {

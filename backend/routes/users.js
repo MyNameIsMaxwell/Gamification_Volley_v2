@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { requireUser, requireRole } = require('../middleware/telegramAuth');
 
 // Helper: Get XP settings
 function getXpSettings(db) {
@@ -24,6 +25,20 @@ function addXpToUser(db, userId, xpAmount, xpSettings) {
   let newLevel = user.level;
   let newTotalXp = user.total_xp + xpAmount;
 
+  // Prevent negative XP
+  if (newXp < 0) newXp = 0;
+  if (newTotalXp < 0) newTotalXp = 0;
+
+  // Level down logic if XP goes negative
+  if (newXp < 0) {
+    while (newXp < 0 && newLevel > 1) {
+      newLevel--;
+      const xpForPrevLevel = getXpForLevel(newLevel, xpSettings);
+      newXp += xpForPrevLevel;
+    }
+    if (newXp < 0) newXp = 0;
+  }
+
   // Level up logic
   let xpNeeded = getXpForLevel(newLevel, xpSettings);
   while (newXp >= xpNeeded) {
@@ -36,6 +51,14 @@ function addXpToUser(db, userId, xpAmount, xpSettings) {
     .run(newXp, newLevel, newTotalXp, userId);
 
   return { xp: newXp, level: newLevel, totalXp: newTotalXp };
+}
+
+// Helper: Subtract XP (for trainers/admins)
+function subtractXpFromUser(db, userId, xpAmount, xpSettings) {
+  const user = db.prepare('SELECT xp, level, total_xp FROM users WHERE id = ?').get(userId);
+  if (!user) return null;
+
+  return addXpToUser(db, userId, -xpAmount, xpSettings);
 }
 
 // Helper: Check and unlock achievements
@@ -134,6 +157,8 @@ function formatUser(db, user) {
     streak: user.streak,
     lastTrainingDate: user.last_training_date,
     lastQRScanDate: user.last_qr_scan_date,
+    assignedCity: user.assigned_city || null,
+    assignedBranch: user.assigned_branch || null,
     skills: allSkills,
     achievements: achievements.map(a => a.achievement_id),
     trainingHistory: history.map(h => ({
@@ -142,32 +167,66 @@ function formatUser(db, user) {
       skillFocus: h.skill_focus || 'general',
       xpEarned: h.xp_earned,
       source: h.source,
-      qrId: h.qr_id
+      qrId: h.qr_id,
+      operatorId: h.operator_id,
+      reason: h.reason
     }))
   };
 }
 
-// GET /api/users/me - Get current user by Telegram ID
+// GET /api/users/me - Get or create current user by Telegram ID
 router.get('/me', (req, res) => {
-  const telegramId = req.query.telegram_id;
-  if (!telegramId) {
-    return res.status(400).json({ error: 'telegram_id required' });
+  if (!req.telegramUser) {
+    return res.status(401).json({ error: 'Authentication required' });
   }
 
-  const user = req.db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(telegramId);
-  if (!user) {
-    return res.status(404).json({ error: 'User not found' });
-  }
+  const telegramId = req.telegramUser.id.toString();
+  
+  try {
+    // Try to find existing user
+    let user = req.db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(telegramId);
+    
+    if (!user) {
+      // Auto-register new user from Telegram data
+      const name = [req.telegramUser.firstName, req.telegramUser.lastName].filter(Boolean).join(' ') || 'Player';
+      const avatar = `https://api.dicebear.com/7.x/avataaars/svg?seed=${telegramId}`;
+      
+      console.log(`[Auth] Auto-registering new user: telegramId=${telegramId}, name=${name}`);
+      
+      const result = req.db.prepare(`
+        INSERT INTO users (telegram_id, name, avatar, city, branch)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(telegramId, name, avatar, 'Минск', 'Центр');
 
-  res.json(formatUser(req.db, user));
+      // Initialize skills for new user
+      const skills = req.db.prepare('SELECT DISTINCT id FROM skills WHERE enabled = 1').all();
+      const insertSkill = req.db.prepare('INSERT OR IGNORE INTO user_skills (user_id, skill_id, value) VALUES (?, ?, 1)');
+      for (const skill of skills) {
+        insertSkill.run(result.lastInsertRowid, skill.id);
+      }
+
+      user = req.db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
+    }
+    
+    console.log(`[Auth] User loaded: id=${user.id}, telegramId=${user.telegram_id}, name=${user.name}`);
+    res.json(formatUser(req.db, user));
+  } catch (error) {
+    console.error('Get/create user error:', error);
+    res.status(500).json({ error: 'Failed to get or create user' });
+  }
 });
 
-// POST /api/users/register - Register new user
+// POST /api/users/register - Register new user (no requireUser — user doesn't exist yet!)
 router.post('/register', (req, res) => {
-  const { telegramId, name, avatar, city, branch } = req.body;
+  if (!req.telegramUser) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
   
-  if (!telegramId || !name) {
-    return res.status(400).json({ error: 'telegramId and name required' });
+  const { name, avatar, city, branch } = req.body;
+  const telegramId = req.telegramUser.id.toString();
+  
+  if (!name) {
+    return res.status(400).json({ error: 'name required' });
   }
 
   try {
@@ -184,8 +243,8 @@ router.post('/register', (req, res) => {
     `).run(telegramId, name, avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${telegramId}`, city || 'Минск', branch || 'Центр');
 
     // Initialize skills
-    const skills = req.db.prepare('SELECT id FROM skills WHERE enabled = 1').all();
-    const insertSkill = req.db.prepare('INSERT INTO user_skills (user_id, skill_id, value) VALUES (?, ?, 1)');
+    const skills = req.db.prepare('SELECT DISTINCT id FROM skills WHERE enabled = 1').all();
+    const insertSkill = req.db.prepare('INSERT OR IGNORE INTO user_skills (user_id, skill_id, value) VALUES (?, ?, 1)');
     for (const skill of skills) {
       insertSkill.run(result.lastInsertRowid, skill.id);
     }
@@ -198,10 +257,43 @@ router.post('/register', (req, res) => {
   }
 });
 
-// GET /api/users - Get all users
+// GET /api/users - Get all users (requires Telegram auth, no requireUser needed)
 router.get('/', (req, res) => {
+  if (!req.telegramUser) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
   const users = req.db.prepare('SELECT * FROM users ORDER BY total_xp DESC').all();
   res.json(users.map(u => formatUser(req.db, u)));
+});
+
+// GET /api/users/zone/students - Get students in trainer's zone (trainer/admin)
+// NOTE: This route must be BEFORE /:id to avoid matching 'zone' as an id
+router.get('/zone/students', requireRole(['TRAINER', 'ADMIN']), (req, res) => {
+  try {
+    let users;
+    
+    if (req.user.role === 'ADMIN') {
+      // Admin sees all students
+      users = req.db.prepare('SELECT * FROM users ORDER BY total_xp DESC').all();
+    } else {
+      // Trainer sees only students in their zone
+      const trainerCity = req.user.assigned_city || req.user.city;
+      const trainerBranch = req.user.assigned_branch;
+      
+      if (trainerBranch) {
+        users = req.db.prepare('SELECT * FROM users WHERE city = ? AND branch = ? ORDER BY total_xp DESC')
+          .all(trainerCity, trainerBranch);
+      } else {
+        users = req.db.prepare('SELECT * FROM users WHERE city = ? ORDER BY total_xp DESC')
+          .all(trainerCity);
+      }
+    }
+    
+    res.json(users.map(u => formatUser(req.db, u)));
+  } catch (error) {
+    console.error('Get zone students error:', error);
+    res.status(500).json({ error: 'Failed to get zone students' });
+  }
 });
 
 // GET /api/users/:id - Get user by ID
@@ -213,15 +305,47 @@ router.get('/:id', (req, res) => {
   res.json(formatUser(req.db, user));
 });
 
+// Helper: Check trainer zone restriction
+function checkTrainerZone(db, trainer, targetUserId) {
+  if (trainer.role === 'ADMIN') return { allowed: true };
+  
+  // Trainer: check assigned city/branch or fallback to own city
+  const trainerCity = trainer.assigned_city || trainer.city;
+  const trainerBranch = trainer.assigned_branch; // null means all branches in city
+  
+  const target = db.prepare('SELECT city, branch FROM users WHERE id = ?').get(targetUserId);
+  if (!target) return { allowed: false, error: 'User not found' };
+  
+  if (target.city !== trainerCity) {
+    return { allowed: false, error: `Вы можете управлять только учениками из города "${trainerCity}"` };
+  }
+  
+  if (trainerBranch && target.branch !== trainerBranch) {
+    return { allowed: false, error: `Вы можете управлять только учениками из филиала "${trainerBranch}"` };
+  }
+  
+  return { allowed: true };
+}
+
 // POST /api/users/award-xp - Award XP to user (trainer/admin) - just XP, no training count
-router.post('/award-xp', (req, res) => {
-  const { userId, xpAmount, skillId } = req.body;
+router.post('/award-xp', requireRole(['TRAINER', 'ADMIN']), (req, res) => {
+  const { userId, xpAmount, skillId, reason } = req.body;
 
   if (!userId || !xpAmount) {
     return res.status(400).json({ error: 'userId and xpAmount required' });
   }
 
+  if (xpAmount <= 0) {
+    return res.status(400).json({ error: 'xpAmount must be positive' });
+  }
+
   try {
+    // Check trainer zone restriction
+    const zoneCheck = checkTrainerZone(req.db, req.user, userId);
+    if (!zoneCheck.allowed) {
+      return res.status(403).json({ error: zoneCheck.error });
+    }
+
     const xpSettings = getXpSettings(req.db);
     const today = new Date().toISOString().split('T')[0];
 
@@ -243,11 +367,11 @@ router.post('/award-xp', (req, res) => {
       `).run(userId, skillId, finalXp, finalXp);
     }
 
-    // Record XP history (but not as training)
+    // Record XP history with operator and reason
     req.db.prepare(`
-      INSERT INTO training_history (user_id, date, skill_focus, xp_earned, source)
-      VALUES (?, ?, ?, ?, 'xp_bonus')
-    `).run(userId, today, skillId || 'general', finalXp);
+      INSERT INTO training_history (user_id, date, skill_focus, xp_earned, source, operator_id, reason)
+      VALUES (?, ?, ?, ?, 'xp_bonus', ?, ?)
+    `).run(userId, today, skillId || 'general', finalXp, req.userId, reason || null);
 
     // Check achievements
     const newAchievements = checkAchievements(req.db, userId);
@@ -270,8 +394,66 @@ router.post('/award-xp', (req, res) => {
   }
 });
 
-// POST /api/users/log-training - Log a training session with multiple skills
-router.post('/log-training', (req, res) => {
+// POST /api/users/deduct-xp - Deduct XP from user (trainer/admin)
+router.post('/deduct-xp', requireRole(['TRAINER', 'ADMIN']), (req, res) => {
+  const { userId, xpAmount, skillId, reason } = req.body;
+
+  if (!userId || !xpAmount) {
+    return res.status(400).json({ error: 'userId and xpAmount required' });
+  }
+
+  if (xpAmount <= 0) {
+    return res.status(400).json({ error: 'xpAmount must be positive' });
+  }
+
+  try {
+    // Check trainer zone restriction
+    const zoneCheck = checkTrainerZone(req.db, req.user, userId);
+    if (!zoneCheck.allowed) {
+      return res.status(403).json({ error: zoneCheck.error });
+    }
+
+    const xpSettings = getXpSettings(req.db);
+    const today = new Date().toISOString().split('T')[0];
+
+    // Subtract XP
+    const result = subtractXpFromUser(req.db, userId, xpAmount, xpSettings);
+    if (!result) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Update skill if provided
+    if (skillId) {
+      const currentSkill = req.db.prepare('SELECT value FROM user_skills WHERE user_id = ? AND skill_id = ?').get(userId, skillId);
+      const currentValue = currentSkill?.value || 0;
+      const newValue = Math.max(0, currentValue - xpAmount);
+      
+      req.db.prepare(`
+        INSERT INTO user_skills (user_id, skill_id, value) VALUES (?, ?, ?)
+        ON CONFLICT(user_id, skill_id) DO UPDATE SET value = ?
+      `).run(userId, skillId, newValue, newValue);
+    }
+
+    // Record XP deduction in history with operator and reason
+    req.db.prepare(`
+      INSERT INTO training_history (user_id, date, skill_focus, xp_earned, source, operator_id, reason)
+      VALUES (?, ?, ?, ?, 'xp_deduction', ?, ?)
+    `).run(userId, today, skillId || 'general', -xpAmount, req.userId, reason || null);
+
+    const user = req.db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+    res.json({
+      user: formatUser(req.db, user),
+      xpDeducted: xpAmount,
+      newAchievements: [] // No achievements on deduction
+    });
+  } catch (error) {
+    console.error('Deduct XP error:', error);
+    res.status(500).json({ error: 'Failed to deduct XP' });
+  }
+});
+
+// POST /api/users/log-training - Log a training session with multiple skills (trainer/admin)
+router.post('/log-training', requireRole(['TRAINER', 'ADMIN']), (req, res) => {
   const { userId, skills, isPreset, presetName } = req.body;
   // skills is an array of { skillId, xpAmount }
 
@@ -343,11 +525,12 @@ router.post('/log-training', (req, res) => {
 });
 
 // POST /api/users/scan-qr - Scan QR code
-router.post('/scan-qr', (req, res) => {
-  const { userId, qrId } = req.body;
+router.post('/scan-qr', requireUser, (req, res) => {
+  const { qrId } = req.body;
+  const userId = req.userId;
 
-  if (!userId || !qrId) {
-    return res.status(400).json({ error: 'userId and qrId required' });
+  if (!qrId) {
+    return res.status(400).json({ error: 'qrId required' });
   }
 
   try {
@@ -375,14 +558,14 @@ router.post('/scan-qr', (req, res) => {
 
     const today = new Date().toISOString().split('T')[0];
     
-    // Check if user already scanned THIS specific QR today
-    const alreadyScanned = req.db.prepare(`
+    // Check if user already scanned ANY QR today (1 per day limit)
+    const todayScans = req.db.prepare(`
       SELECT * FROM training_history 
-      WHERE user_id = ? AND qr_id = ? AND date = ?
-    `).get(userId, qrId, today);
+      WHERE user_id = ? AND date = ? AND source = 'qr'
+    `).all(userId, today);
     
-    if (alreadyScanned) {
-      return res.status(400).json({ error: 'You already scanned this QR code today' });
+    if (todayScans.length > 0) {
+      return res.status(400).json({ error: 'You can only scan one QR code per day' });
     }
 
     // Increment QR uses count
@@ -477,30 +660,36 @@ router.post('/scan-qr', (req, res) => {
   }
 });
 
-// PUT /api/users/:id/role - Update user role
-router.put('/:id/role', (req, res) => {
+// PUT /api/users/:id/role - Update user role (admin only)
+router.put('/:id/role', requireRole(['ADMIN']), (req, res) => {
   const { role } = req.body;
   if (!['STUDENT', 'TRAINER', 'ADMIN'].includes(role)) {
     return res.status(400).json({ error: 'Invalid role' });
   }
 
-  req.db.prepare('UPDATE users SET role = ?, updated_at = datetime("now") WHERE id = ?').run(role, req.params.id);
   const user = req.db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
-  
   if (!user) {
     return res.status(404).json({ error: 'User not found' });
   }
+
+  req.db.prepare('UPDATE users SET role = ?, updated_at = datetime("now") WHERE id = ?').run(role, req.params.id);
+  const updatedUser = req.db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   
-  res.json(formatUser(req.db, user));
+  res.json(formatUser(req.db, updatedUser));
 });
 
-// PUT /api/users/:id/profile - Update user profile (name, avatar, city, branch)
-router.put('/:id/profile', (req, res) => {
+// PUT /api/users/:id/profile - Update user profile (admin only, or self)
+router.put('/:id/profile', requireUser, (req, res) => {
   const { name, avatar, city, branch } = req.body;
   
   const user = req.db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!user) {
     return res.status(404).json({ error: 'User not found' });
+  }
+
+  // Allow self-edit or admin edit
+  if (req.userId !== user.id && req.user.role !== 'ADMIN') {
+    return res.status(403).json({ error: 'Insufficient permissions' });
   }
 
   try {
@@ -543,7 +732,7 @@ router.put('/:id/profile', (req, res) => {
 });
 
 // PUT /api/users/:id/stats - Update user stats (admin only)
-router.put('/:id/stats', (req, res) => {
+router.put('/:id/stats', requireRole(['ADMIN']), (req, res) => {
   const { xp, totalXp, level, trainingsCompleted, streak } = req.body;
   
   const user = req.db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
@@ -593,8 +782,8 @@ router.put('/:id/stats', (req, res) => {
   }
 });
 
-// POST /api/users/:id/achievements/:achievementId - Grant achievement to user
-router.post('/:id/achievements/:achievementId', (req, res) => {
+// POST /api/users/:id/achievements/:achievementId - Grant achievement to user (admin only)
+router.post('/:id/achievements/:achievementId', requireRole(['ADMIN']), (req, res) => {
   const { id, achievementId } = req.params;
   
   const user = req.db.prepare('SELECT * FROM users WHERE id = ?').get(id);
@@ -619,8 +808,8 @@ router.post('/:id/achievements/:achievementId', (req, res) => {
   }
 });
 
-// DELETE /api/users/:id/achievements/:achievementId - Revoke achievement from user
-router.delete('/:id/achievements/:achievementId', (req, res) => {
+// DELETE /api/users/:id/achievements/:achievementId - Revoke achievement from user (admin only)
+router.delete('/:id/achievements/:achievementId', requireRole(['ADMIN']), (req, res) => {
   const { id, achievementId } = req.params;
   
   try {
@@ -632,8 +821,8 @@ router.delete('/:id/achievements/:achievementId', (req, res) => {
   }
 });
 
-// POST /api/users/:id/recalculate-skills - Recalculate skills from training history
-router.post('/:id/recalculate-skills', (req, res) => {
+// POST /api/users/:id/recalculate-skills - Recalculate skills from training history (admin only)
+router.post('/:id/recalculate-skills', requireRole(['ADMIN']), (req, res) => {
   const { id } = req.params;
   
   const user = req.db.prepare('SELECT * FROM users WHERE id = ?').get(id);
@@ -706,6 +895,69 @@ router.post('/:id/recalculate-skills', (req, res) => {
   } catch (error) {
     console.error('Recalculate skills error:', error);
     res.status(500).json({ error: 'Failed to recalculate skills' });
+  }
+});
+
+// GET /api/users/:id/xp-history - Get XP operation history for a user (trainer/admin)
+router.get('/:id/xp-history', requireRole(['TRAINER', 'ADMIN']), (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    // Check trainer zone restriction
+    const zoneCheck = checkTrainerZone(req.db, req.user, id);
+    if (!zoneCheck.allowed) {
+      return res.status(403).json({ error: zoneCheck.error });
+    }
+
+    const history = req.db.prepare(`
+      SELECT th.*, u.name as operator_name 
+      FROM training_history th 
+      LEFT JOIN users u ON th.operator_id = u.id 
+      WHERE th.user_id = ? 
+      ORDER BY th.created_at DESC 
+      LIMIT 100
+    `).all(id);
+
+    res.json(history.map(h => ({
+      id: h.id,
+      date: h.date,
+      skillFocus: h.skill_focus || 'general',
+      xpEarned: h.xp_earned,
+      source: h.source,
+      qrId: h.qr_id,
+      operatorId: h.operator_id,
+      operatorName: h.operator_name || null,
+      reason: h.reason || null,
+      createdAt: h.created_at
+    })));
+  } catch (error) {
+    console.error('Get XP history error:', error);
+    res.status(500).json({ error: 'Failed to get XP history' });
+  }
+});
+
+// PUT /api/users/:id/assignment - Update trainer assignment (admin only)
+router.put('/:id/assignment', requireRole(['ADMIN']), (req, res) => {
+  const { assignedCity, assignedBranch } = req.body;
+  
+  const user = req.db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  if (user.role !== 'TRAINER') {
+    return res.status(400).json({ error: 'Assignments can only be set for trainers' });
+  }
+
+  try {
+    req.db.prepare('UPDATE users SET assigned_city = ?, assigned_branch = ?, updated_at = datetime("now") WHERE id = ?')
+      .run(assignedCity || null, assignedBranch || null, req.params.id);
+    
+    const updatedUser = req.db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+    res.json(formatUser(req.db, updatedUser));
+  } catch (error) {
+    console.error('Update assignment error:', error);
+    res.status(500).json({ error: 'Failed to update assignment' });
   }
 });
 

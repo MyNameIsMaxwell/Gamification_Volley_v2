@@ -1,7 +1,10 @@
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const { initDatabase } = require('./database');
+const { telegramAuthMiddleware } = require('./middleware/telegramAuth');
 
 // Import routes
 const usersRoutes = require('./routes/users');
@@ -31,6 +34,9 @@ async function startServer() {
       next();
     });
 
+    // Telegram authentication middleware (applied to all API routes)
+    app.use('/api', telegramAuthMiddleware);
+
     // API Routes
     app.use('/api/users', usersRoutes);
     app.use('/api/rankings', rankingsRoutes);
@@ -53,6 +59,8 @@ async function startServer() {
 
     app.listen(PORT, () => {
       console.log(`🏐 VolleyLevel API running on port ${PORT}`);
+      console.log(`   NODE_ENV: ${process.env.NODE_ENV || '⚠️ NOT SET (defaults to development mode!)'}`);
+      console.log(`   BOT_TOKEN: ${process.env.BOT_TOKEN ? '✅ configured (' + process.env.BOT_TOKEN.substring(0, 8) + '...)' : '❌ NOT SET — Telegram auth will fail in production!'}`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);

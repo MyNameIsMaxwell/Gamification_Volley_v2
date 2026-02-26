@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import Layout from './components/Layout';
-import { User, UserRole, XPConfig, AchievementCriteria, SkillDefinition, QRCodeDefinition } from './types';
+import { User, UserRole, XPConfig, AchievementCriteria, SkillDefinition, QRCodeDefinition, XpHistoryEntry } from './types';
 import { calculateProgress, getXpForNextLevel, getRankTitle, getSkillLevelInfo, SkillLevelInfo } from './utils/levelLogic';
 import SkillRadar from './components/SkillRadar';
 import StudentProfile from './components/StudentProfile';
@@ -10,7 +10,7 @@ import AchievementToast from './components/AchievementToast';
 import QRScanner from './components/QRScanner';
 import { getAiCoachAdvice } from './services/deepseekService';
 import * as api from './services/api';
-import { ChevronRight, Shield, QrCode, Award, Flame, Zap, Lock, Loader2 } from 'lucide-react';
+import { ChevronRight, Shield, QrCode, Award, Flame, Zap, Lock, Loader2, Search, Filter, Clock, Minus, Plus, MapPin, Users } from 'lucide-react';
 
 // Telegram WebApp type declaration
 declare global {
@@ -86,8 +86,21 @@ const App: React.FC = () => {
   const [xpToAward, setXpToAward] = useState(100);
   
   // Training form state
-  const [trainingMode, setTrainingMode] = useState<'preset' | 'custom' | 'bonus'>('preset');
+  const [trainingMode, setTrainingMode] = useState<'preset' | 'custom' | 'bonus' | 'students'>('preset');
   const [trainingSkills, setTrainingSkills] = useState<{skillId: string; xpAmount: number}[]>([]);
+
+  // Trainer student management state
+  const [trainerStudentFilter, setTrainerStudentFilter] = useState({ search: '', city: '', branch: '', minLevel: '', maxLevel: '' });
+  const [trainerSelectedStudent, setTrainerSelectedStudent] = useState<User | null>(null);
+  const [trainerXpForm, setTrainerXpForm] = useState({ amount: 100, skillId: '', operation: 'deduct' as 'add' | 'deduct', reason: '' });
+  const [trainerXpHistory, setTrainerXpHistory] = useState<XpHistoryEntry[]>([]);
+  const [trainerShowHistory, setTrainerShowHistory] = useState(false);
+  const [trainerSaving, setTrainerSaving] = useState(false);
+
+  // Only enabled skill definitions for charts and displays
+  const enabledSkillDefinitions = useMemo(() => {
+    return skillDefinitions.filter(d => enabledSkills.includes(d.id));
+  }, [skillDefinitions, enabledSkills]);
 
   const isWeekend = useMemo(() => [0, 6].includes(new Date().getDay()), []);
   const canScanToday = useMemo(() => {
@@ -95,6 +108,97 @@ const App: React.FC = () => {
     const today = new Date().toISOString().split('T')[0];
     return user.lastQRScanDate !== today;
   }, [user?.lastQRScanDate]);
+
+  // Refresh data helper
+  const refreshData = useCallback(async () => {
+    try {
+      const [currentUser, allUsers] = await Promise.all([
+        user ? api.getUserById(user.id) : null,
+        api.getAllUsers()
+      ]);
+      if (currentUser) setUser(currentUser);
+      setStudents(allUsers);
+    } catch (err) {
+      console.error('Refresh error:', err);
+    }
+  }, [user]);
+
+  // Trainer zone filtered students
+  const trainerZoneStudents = useMemo(() => {
+    if (!user || !students || students.length === 0) return [];
+    
+    try {
+      // First, filter only STUDENT role (exclude ADMIN and TRAINER)
+      let filtered = students.filter(s => s && s.role === UserRole.STUDENT);
+      
+      // If trainer (not admin), restrict to their zone
+      if (user.role === UserRole.TRAINER) {
+        const trainerCity = user.assignedCity || user.city || '';
+        const trainerBranch = user.assignedBranch || null;
+        
+        if (trainerCity) {
+          filtered = filtered.filter(s => {
+            if (!s || !s.city) return false;
+            if (s.city !== trainerCity) return false;
+            if (trainerBranch && s.branch !== trainerBranch) return false;
+            return true;
+          });
+        }
+      }
+      
+      // Apply additional filters
+      return filtered.filter(s => {
+        if (!s) return false;
+        if (trainerStudentFilter.search && s.name && !s.name.toLowerCase().includes(trainerStudentFilter.search.toLowerCase())) return false;
+        if (trainerStudentFilter.city && s.city !== trainerStudentFilter.city) return false;
+        if (trainerStudentFilter.branch && s.branch !== trainerStudentFilter.branch) return false;
+        if (trainerStudentFilter.minLevel && s.level < Number(trainerStudentFilter.minLevel)) return false;
+        if (trainerStudentFilter.maxLevel && s.level > Number(trainerStudentFilter.maxLevel)) return false;
+        return true;
+      }).sort((a, b) => (b?.totalXp || 0) - (a?.totalXp || 0));
+    } catch (err) {
+      console.error('Error filtering trainer zone students:', err);
+      return [];
+    }
+  }, [user, students, trainerStudentFilter]);
+
+  // Trainer XP operation handler
+  const handleTrainerXpOperation = useCallback(async () => {
+    if (!trainerSelectedStudent || !trainerXpForm.amount || trainerXpForm.amount <= 0) {
+      alert('Укажите ученика и количество XP');
+      return;
+    }
+    setTrainerSaving(true);
+    try {
+      if (trainerXpForm.operation === 'add') {
+        const result = await api.awardXp(trainerSelectedStudent.id, trainerXpForm.amount, trainerXpForm.skillId || undefined, trainerXpForm.reason || undefined);
+        alert(`Начислено ${result.xpAwarded} XP${result.weekendBonus ? ' (x2 выходные!)' : ''}`);
+      } else {
+        await api.deductXp(trainerSelectedStudent.id, trainerXpForm.amount, trainerXpForm.skillId || undefined, trainerXpForm.reason || undefined);
+        alert(`Списано ${trainerXpForm.amount} XP`);
+      }
+      setTrainerSelectedStudent(null);
+      setTrainerXpForm({ amount: 100, skillId: '', operation: 'deduct', reason: '' });
+      await refreshData();
+    } catch (err: any) {
+      console.error('Trainer XP operation error:', err);
+      alert(err.message || 'Ошибка операции');
+    } finally {
+      setTrainerSaving(false);
+    }
+  }, [trainerSelectedStudent, trainerXpForm, refreshData]);
+
+  // Load XP history for a student (trainer view)
+  const loadTrainerXpHistory = useCallback(async (studentId: string) => {
+    try {
+      const history = await api.getXpHistory(studentId);
+      setTrainerXpHistory(history);
+      setTrainerShowHistory(true);
+    } catch (err: any) {
+      console.error('Load history error:', err);
+      alert(err.message || 'Ошибка загрузки истории');
+    }
+  }, []);
 
   // Initialize app
   useEffect(() => {
@@ -119,9 +223,14 @@ const App: React.FC = () => {
           }
         }
 
-        // Load all data in parallel
+        // Step 1: Authenticate & get/create current user FIRST
+        const currentUser = await api.getCurrentUser();
+        if (currentUser) {
+          setUser(currentUser);
+        }
+
+        // Step 2: Load everything else in parallel (user is now guaranteed to exist)
         const [
-          currentUser,
           allUsers,
           skills,
           achievements,
@@ -129,7 +238,6 @@ const App: React.FC = () => {
           locations,
           xpConfig
         ] = await Promise.all([
-          api.getCurrentUser(),
           api.getAllUsers(),
           api.getSkills(),
           api.getAchievements(),
@@ -138,9 +246,6 @@ const App: React.FC = () => {
           api.getXpSettings()
         ]);
 
-        if (currentUser) {
-          setUser(currentUser);
-        }
         setStudents(allUsers);
         setSkillDefinitions(skills);
         setEnabledSkills(skills.filter((s: any) => s.enabled !== false).map(s => s.id));
@@ -163,20 +268,6 @@ const App: React.FC = () => {
 
     initApp();
   }, []);
-
-  // Refresh data helper
-  const refreshData = useCallback(async () => {
-    try {
-      const [currentUser, allUsers] = await Promise.all([
-        user ? api.getUserById(user.id) : null,
-        api.getAllUsers()
-      ]);
-      if (currentUser) setUser(currentUser);
-      setStudents(allUsers);
-    } catch (err) {
-      console.error('Refresh error:', err);
-    }
-  }, [user]);
 
   // Award XP handler
   const handleAwardXp = useCallback(async () => {
@@ -215,7 +306,7 @@ const App: React.FC = () => {
     if (!user) return;
 
     try {
-      const result = await api.scanQR(user.id, qrId);
+      const result = await api.scanQR(qrId);
       
       if (result.newAchievements?.length > 0) {
         setUnlockedAchievement(result.newAchievements[0]);
@@ -249,27 +340,34 @@ const App: React.FC = () => {
     if (activeTab === 'skills' && !aiAdvice && user) fetchAdvice();
   }, [activeTab, aiAdvice, user, fetchAdvice]);
 
+  // Only students with at least 1 training for leaderboards
+  const leaderboardStudents = useMemo(() => {
+    return students
+      .filter(s => s.role === UserRole.STUDENT && s.trainingsCompleted > 0)
+      .sort((a, b) => b.totalXp - a.totalXp);
+  }, [students]);
+
   // Rankings calculations
   const cityRankings = useMemo(() => {
     const counts: Record<string, { xp: number, students: number }> = {};
-    students.forEach(s => {
+    leaderboardStudents.forEach(s => {
       if (!counts[s.city]) counts[s.city] = { xp: 0, students: 0 };
       counts[s.city].xp += s.totalXp;
       counts[s.city].students += 1;
     });
     return Object.entries(counts).sort((a,b) => b[1].xp - a[1].xp);
-  }, [students]);
+  }, [leaderboardStudents]);
 
   const branchRankings = useMemo(() => {
     const counts: Record<string, { xp: number, students: number, city: string }> = {};
-    students.forEach(s => {
+    leaderboardStudents.forEach(s => {
       const key = `${s.city}:${s.branch}`;
       if (!counts[key]) counts[key] = { xp: 0, students: 0, city: s.city };
       counts[key].xp += s.totalXp;
       counts[key].students += 1;
     });
     return Object.entries(counts).sort((a,b) => b[1].xp - a[1].xp);
-  }, [students]);
+  }, [leaderboardStudents]);
 
   // Admin handlers
   const handleUpdateXpConfig = useCallback(async (config: XPConfig) => {
@@ -403,16 +501,26 @@ const App: React.FC = () => {
 
   // Error screen
   if (error || !user) {
+    const tg = window.Telegram?.WebApp;
+    const isTelegram = !!tg;
+    
     return (
       <div className="min-h-screen bg-[#f5f5f5] flex items-center justify-center p-4">
         <div className="text-center bg-white rounded-3xl p-6 shadow-sm max-w-sm">
-          <p className="text-[#1a1a1a] text-[16px] mb-4">{error || 'Откройте приложение через Telegram'}</p>
+          <p className="text-[#1a1a1a] text-[16px] mb-4">
+            {error || (isTelegram ? 'Ошибка загрузки данных' : 'Откройте приложение через Telegram')}
+          </p>
           <button 
             onClick={() => window.location.reload()} 
             className="bg-[#007aff] text-white px-6 py-3 rounded-2xl font-bold"
           >
             Обновить
           </button>
+          {!isTelegram && (
+            <p className="text-[#6b7280] text-[12px] mt-4">
+              Это приложение работает только внутри Telegram
+            </p>
+          )}
         </div>
       </div>
     );
@@ -427,27 +535,18 @@ const App: React.FC = () => {
       {unlockedAchievement && <AchievementToast achievement={unlockedAchievement} onClose={() => setUnlockedAchievement(null)} />}
       {showScanner && <QRScanner onScan={handleQRScan} onClose={() => setShowScanner(false)} />}
 
+      {user.role === UserRole.ADMIN && (
       <div className="mx-4 mb-6 bg-[#007aff]/10 p-3 rounded-xl flex justify-between items-center text-[12px] border border-[#007aff]/20">
-        <div className="flex items-center gap-2"><Shield size={14} className="text-[#007aff]" /><span className="font-bold text-[#007aff]">РЕЖИМ: {user.role === UserRole.STUDENT ? 'УЧЕНИК' : user.role === UserRole.TRAINER ? 'ТРЕНЕР' : 'АДМИН'}</span></div>
-        <button onClick={async () => {
-          const roles = [UserRole.STUDENT, UserRole.TRAINER, UserRole.ADMIN];
-          const next = roles[(roles.indexOf(user.role) + 1) % roles.length];
-          try {
-            const updated = await api.updateUserRole(user.id, next);
-            setUser(updated);
-            setActiveTab('dashboard');
-          } catch (err) {
-            console.error('Role change error:', err);
-          }
-        }} className="bg-[#007aff] text-white px-3 py-1 rounded-lg font-bold active-scale">Сменить</button>
+          <div className="flex items-center gap-2"><Shield size={14} className="text-[#007aff]" /><span className="font-bold text-[#007aff]">РЕЖИМ: АДМИНИСТРАТОР</span></div>
       </div>
+      )}
 
       {viewedStudentId ? (
         <StudentProfile 
           student={students.find(s=>s.id===viewedStudentId)!} 
           masterAchievements={achievementList} 
           onBack={() => setViewedStudentId(null)} 
-          skillDefinitions={skillDefinitions} 
+          skillDefinitions={enabledSkillDefinitions} 
           xpConfig={xpSettings}
           cityBranches={cityBranches}
           isOwnProfile={viewedStudentId === user.id}
@@ -510,7 +609,7 @@ const App: React.FC = () => {
 
           {activeTab === 'skills' && (
             <div className="space-y-6 pb-20">
-               <div className="mx-4"><SkillRadar skills={user.skills} definitions={skillDefinitions} /></div>
+               <div className="mx-4"><SkillRadar skills={user.skills} definitions={enabledSkillDefinitions} /></div>
                
                {/* Skill Levels Legend */}
                <div className="mx-4 bg-gradient-to-r from-blue-50 to-indigo-50 p-4 rounded-2xl border border-blue-100">
@@ -542,7 +641,7 @@ const App: React.FC = () => {
 
                <div className="ios-section-title">Прогресс навыков</div>
                <div className="mx-4 space-y-3">
-                  {skillDefinitions.map(def => {
+                  {enabledSkillDefinitions.map(def => {
                     const skillXp = user.skills[def.id] || 0;
                     const info: SkillLevelInfo = getSkillLevelInfo(skillXp);
                     
@@ -619,7 +718,7 @@ const App: React.FC = () => {
                 <button onClick={() => setLeaderboardMode('cities')} className={`flex-1 py-2 rounded-lg text-[12px] font-bold transition-all ${leaderboardMode === 'cities' ? 'bg-white shadow-sm text-[#007aff]' : 'text-[#8e8e93]'}`}>Города</button>
               </div>
               <div className="ios-list-group">
-                {leaderboardMode === 'players' && students.sort((a,b)=>b.totalXp - a.totalXp).map((s, idx) => (
+                {leaderboardMode === 'players' && leaderboardStudents.map((s, idx) => (
                   <div key={s.id} className="ios-list-item cursor-pointer" onClick={() => setViewedStudentId(s.id)}>
                     <div className="flex items-center gap-3">
                       <span className={`w-5 text-[14px] font-bold ${idx < 3 ? 'text-[#007aff]' : 'text-[#6b7280]'}`}>{idx+1}</span>
@@ -652,23 +751,40 @@ const App: React.FC = () => {
 
           {activeTab === 'trainer' && (
              <div className="space-y-6">
+                {/* Zone indicator */}
+                {user && user.role === UserRole.TRAINER && (
+                  <div className="mx-4 bg-[#5856d6]/10 p-3 rounded-xl flex items-center gap-2 text-[12px] border border-[#5856d6]/20">
+                    <MapPin size={14} className="text-[#5856d6]" />
+                    <span className="font-bold text-[#5856d6]">
+                      Зона: {(user.assignedCity || user.city || 'Не назначена')}{user.assignedBranch ? ` / ${user.assignedBranch}` : ''}
+                    </span>
+                  </div>
+                )}
+
                 {/* Mode selector */}
                 <div className="mx-4 flex bg-[#f2f2f7] p-1 rounded-xl gap-1">
+                  <button onClick={() => setTrainingMode('students')} className={`flex-1 py-2 rounded-lg text-[12px] font-bold transition-all ${trainingMode === 'students' ? 'bg-white shadow-sm text-[#007aff]' : 'text-[#8e8e93]'}`}>Ученики</button>
                   <button onClick={() => setTrainingMode('preset')} className={`flex-1 py-2 rounded-lg text-[12px] font-bold transition-all ${trainingMode === 'preset' ? 'bg-white shadow-sm text-[#007aff]' : 'text-[#8e8e93]'}`}>Тренировка</button>
-                  <button onClick={() => setTrainingMode('custom')} className={`flex-1 py-2 rounded-lg text-[12px] font-bold transition-all ${trainingMode === 'custom' ? 'bg-white shadow-sm text-[#007aff]' : 'text-[#8e8e93]'}`}>Несколько навыков</button>
-                  <button onClick={() => setTrainingMode('bonus')} className={`flex-1 py-2 rounded-lg text-[12px] font-bold transition-all ${trainingMode === 'bonus' ? 'bg-white shadow-sm text-[#007aff]' : 'text-[#8e8e93]'}`}>Бонус XP</button>
+                  <button onClick={() => setTrainingMode('custom')} className={`flex-1 py-2 rounded-lg text-[12px] font-bold transition-all ${trainingMode === 'custom' ? 'bg-white shadow-sm text-[#007aff]' : 'text-[#8e8e93]'}`}>Навыки</button>
+                  <button onClick={() => setTrainingMode('bonus')} className={`flex-1 py-2 rounded-lg text-[12px] font-bold transition-all ${trainingMode === 'bonus' ? 'bg-white shadow-sm text-[#007aff]' : 'text-[#8e8e93]'}`}>Бонус</button>
                 </div>
 
-                {/* Student selector */}
+                {/* Student selector — only for training modes */}
+                {trainingMode !== 'students' && (
                 <div className="ios-list-group">
                   <div className="ios-list-item">
                     <span className="text-[#1a1a1a]">Ученик</span>
                     <select className="bg-transparent text-[#007aff] font-bold" value={selectedStudentId} onChange={e=>setSelectedStudentId(e.target.value)}>
                       <option value="">Выбрать...</option>
-                      {students.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+                      {trainerZoneStudents && trainerZoneStudents.length > 0 ? (
+                        trainerZoneStudents.map(s => s ? <option key={s.id} value={s.id}>{s.name || 'Без имени'}</option> : null)
+                      ) : (
+                        <option value="" disabled>Нет доступных учеников</option>
+                      )}
                     </select>
                   </div>
                 </div>
+                )}
 
                 {/* Preset training mode */}
                 {trainingMode === 'preset' && (
@@ -735,7 +851,7 @@ const App: React.FC = () => {
                               setTrainingSkills(updated);
                             }}
                           >
-                            {skillDefinitions.map(d=><option key={d.id} value={d.id}>{d.label}</option>)}
+                            {enabledSkillDefinitions.map(d=><option key={d.id} value={d.id}>{d.label}</option>)}
                           </select>
                           <input 
                             type="number" 
@@ -795,7 +911,7 @@ const App: React.FC = () => {
                       <div className="ios-list-item">
                         <span className="text-[#1a1a1a]">Навык</span>
                         <select className="bg-transparent text-[#007aff] font-bold" value={selectedSkill} onChange={e=>setSelectedSkill(e.target.value)}>
-                          {skillDefinitions.map(d=><option key={d.id} value={d.id}>{d.label}</option>)}
+                          {enabledSkillDefinitions.map(d=><option key={d.id} value={d.id}>{d.label}</option>)}
                         </select>
                       </div>
                       <div className="ios-list-item">
@@ -809,6 +925,249 @@ const App: React.FC = () => {
                       </button>
                     </div>
                   </>
+                )}
+
+                {/* Students management mode */}
+                {trainingMode === 'students' && (
+                  <div className="space-y-4 pb-12">
+                    {/* XP Operation Modal */}
+                    {trainerSelectedStudent && !trainerShowHistory && (
+                      <div className="fixed inset-0 z-[100] bg-black/50 flex items-end justify-center">
+                        <div className="bg-white w-full max-w-md rounded-t-3xl p-6 animate-in slide-in-from-bottom duration-300 max-h-[85vh] overflow-y-auto">
+                          <div className="flex justify-between items-center mb-4">
+                            <div className="flex items-center gap-3">
+                              <img src={trainerSelectedStudent.avatar} className="w-10 h-10 rounded-full bg-gray-100" />
+                              <div>
+                                <h3 className="text-[16px] font-bold text-[#1a1a1a]">{trainerSelectedStudent.name}</h3>
+                                <p className="text-[11px] text-[#6b7280]">
+                                  Ур. {trainerSelectedStudent.level} • {trainerSelectedStudent.totalXp.toLocaleString()} XP • {trainerSelectedStudent.city}
+                                </p>
+                              </div>
+                            </div>
+                            <button onClick={() => { setTrainerSelectedStudent(null); setTrainerXpForm({ amount: 100, skillId: '', operation: 'deduct', reason: '' }); }} className="p-2 text-[#6b7280]">✕</button>
+                          </div>
+
+                          <div className="space-y-4">
+                            <div className="ios-section-title px-0">Операция с XP</div>
+                            <div className="ios-list-group mx-0">
+                              <div className="ios-list-item">
+                                <span className="text-[#1a1a1a]">Операция</span>
+                                <select 
+                                  className="bg-transparent outline-none text-[#007aff] font-bold" 
+                                  value={trainerXpForm.operation} 
+                                  onChange={e => setTrainerXpForm({...trainerXpForm, operation: e.target.value as 'add' | 'deduct'})}
+                                >
+                                  <option value="add">Начислить</option>
+                                  <option value="deduct">Списать</option>
+                                </select>
+                              </div>
+                              <div className="ios-list-item">
+                                <span className="text-[#1a1a1a]">Количество XP</span>
+                                <input 
+                                  type="number" min="1"
+                                  className="text-right w-24 outline-none text-[#007aff] font-bold" 
+                                  value={trainerXpForm.amount} 
+                                  onChange={e => setTrainerXpForm({...trainerXpForm, amount: Number(e.target.value)})}
+                                />
+                              </div>
+                              <div className="ios-list-item">
+                                <span className="text-[#1a1a1a]">Навык</span>
+                                <select 
+                                  className="bg-transparent outline-none text-[#007aff] font-bold" 
+                                  value={trainerXpForm.skillId} 
+                                  onChange={e => setTrainerXpForm({...trainerXpForm, skillId: e.target.value})}
+                                >
+                                  <option value="">Общий XP</option>
+                                  {enabledSkillDefinitions.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+                                </select>
+                              </div>
+                              <div className="ios-list-item">
+                                <input 
+                                  type="text"
+                                  placeholder="Причина (опционально)"
+                                  className="w-full outline-none bg-transparent text-[#1a1a1a] text-[14px]" 
+                                  value={trainerXpForm.reason} 
+                                  onChange={e => setTrainerXpForm({...trainerXpForm, reason: e.target.value})}
+                                />
+                              </div>
+                            </div>
+                            {trainerXpForm.operation === 'deduct' && (
+                              <p className="text-[11px] text-[#ff3b30] bg-[#ff3b30]/10 p-3 rounded-xl">
+                                ⚠️ Списание XP будет записано в историю с указанием причины.
+                              </p>
+                            )}
+                            <button 
+                              onClick={handleTrainerXpOperation} 
+                              disabled={trainerSaving}
+                              className={`w-full py-4 rounded-2xl font-bold active-scale disabled:opacity-50 ${
+                                trainerXpForm.operation === 'deduct' ? 'bg-[#ff3b30] text-white' : 'bg-[#007aff] text-white'
+                              }`}
+                            >
+                              {trainerSaving ? 'Обработка...' : (trainerXpForm.operation === 'add' ? `Начислить ${trainerXpForm.amount} XP` : `Списать ${trainerXpForm.amount} XP`)}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* XP History Modal */}
+                    {trainerShowHistory && (
+                      <div className="fixed inset-0 z-[100] bg-black/50 flex items-end justify-center">
+                        <div className="bg-white w-full max-w-md rounded-t-3xl p-6 animate-in slide-in-from-bottom duration-300 max-h-[85vh] overflow-y-auto">
+                          <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-[16px] font-bold text-[#1a1a1a]">История XP операций</h3>
+                            <button onClick={() => { setTrainerShowHistory(false); setTrainerXpHistory([]); }} className="p-2 text-[#6b7280]">✕</button>
+                          </div>
+                          {trainerXpHistory.length === 0 ? (
+                            <div className="text-center py-8 text-[#8e8e93]">
+                              <Clock size={32} className="mx-auto mb-2 opacity-30" />
+                              <p className="text-[14px]">Нет записей</p>
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              {trainerXpHistory.map(h => (
+                                <div key={h.id} className={`p-3 rounded-xl border ${
+                                  h.xpEarned < 0 ? 'bg-[#ff3b30]/5 border-[#ff3b30]/20' : 'bg-[#34c759]/5 border-[#34c759]/20'
+                                }`}>
+                                  <div className="flex justify-between items-start">
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-2">
+                                        <span className={`font-bold text-[14px] ${h.xpEarned < 0 ? 'text-[#ff3b30]' : 'text-[#34c759]'}`}>
+                                          {h.xpEarned > 0 ? '+' : ''}{h.xpEarned} XP
+                                        </span>
+                                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#f2f2f7] text-[#6b7280] font-bold">
+                                          {h.source === 'xp_bonus' ? 'Начисление' : 
+                                           h.source === 'xp_deduction' ? 'Списание' :
+                                           h.source === 'training' ? 'Тренировка' :
+                                           h.source === 'preset' ? 'Пресет' :
+                                           h.source === 'qr' ? 'QR' : h.source}
+                                        </span>
+                                      </div>
+                                      {h.skillFocus && h.skillFocus !== 'general' && (
+                                        <p className="text-[11px] text-[#6b7280] mt-1">
+                                          Навык: {skillDefinitions.find(s => s.id === h.skillFocus)?.label || h.skillFocus}
+                                        </p>
+                                      )}
+                                      {h.reason && (
+                                        <p className="text-[11px] text-[#374151] mt-1 italic">Причина: {h.reason}</p>
+                                      )}
+                                      {h.operatorName && (
+                                        <p className="text-[10px] text-[#8e8e93] mt-1">Выполнил: {h.operatorName}</p>
+                                      )}
+                                    </div>
+                                    <span className="text-[10px] text-[#8e8e93] whitespace-nowrap ml-2">
+                                      {new Date(h.createdAt).toLocaleDateString('ru', { day: '2-digit', month: '2-digit' })}
+                                    </span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Filters */}
+                    <div className="px-4 space-y-3">
+                      <div className="ios-section-title px-0">Фильтры</div>
+                      <div className="flex gap-2 flex-wrap">
+                        <input 
+                          placeholder="Поиск по имени..." 
+                          className="flex-1 min-w-[150px] bg-white p-3 rounded-xl border border-[#e5e5e5] outline-none text-[13px] text-[#1a1a1a]"
+                          value={trainerStudentFilter.search}
+                          onChange={e => setTrainerStudentFilter({...trainerStudentFilter, search: e.target.value})}
+                        />
+                        {user.role === UserRole.ADMIN && (
+                          <>
+                            <select 
+                              className="bg-white p-3 rounded-xl border border-[#e5e5e5] outline-none text-[13px] text-[#007aff]"
+                              value={trainerStudentFilter.city}
+                              onChange={e => setTrainerStudentFilter({...trainerStudentFilter, city: e.target.value, branch: ''})}
+                            >
+                              <option value="">Все города</option>
+                              {Object.keys(cityBranches).map(c => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                            <select 
+                              className="bg-white p-3 rounded-xl border border-[#e5e5e5] outline-none text-[13px] text-[#007aff]"
+                              value={trainerStudentFilter.branch}
+                              onChange={e => setTrainerStudentFilter({...trainerStudentFilter, branch: e.target.value})}
+                              disabled={!trainerStudentFilter.city}
+                            >
+                              <option value="">Все филиалы</option>
+                              {trainerStudentFilter.city && cityBranches[trainerStudentFilter.city]?.map(b => <option key={b} value={b}>{b}</option>)}
+                            </select>
+                          </>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <input 
+                          type="number" placeholder="Мин. ур."
+                          className="w-full bg-white p-2 rounded-lg border border-[#e5e5e5] outline-none text-[12px]"
+                          value={trainerStudentFilter.minLevel}
+                          onChange={e => setTrainerStudentFilter({...trainerStudentFilter, minLevel: e.target.value})}
+                        />
+                        <input 
+                          type="number" placeholder="Макс. ур."
+                          className="w-full bg-white p-2 rounded-lg border border-[#e5e5e5] outline-none text-[12px]"
+                          value={trainerStudentFilter.maxLevel}
+                          onChange={e => setTrainerStudentFilter({...trainerStudentFilter, maxLevel: e.target.value})}
+                        />
+                      </div>
+                      <button 
+                        onClick={() => setTrainerStudentFilter({ search: '', city: '', branch: '', minLevel: '', maxLevel: '' })}
+                        className="w-full bg-[#f2f2f7] text-[#6b7280] py-2 rounded-xl text-[12px] font-bold"
+                      >
+                        Сбросить фильтры
+                      </button>
+                    </div>
+
+                    {/* Student list */}
+                    <div className="ios-section-title">Ученики ({trainerZoneStudents?.length || 0})</div>
+                    <div className="px-4 space-y-2">
+                      {trainerZoneStudents && trainerZoneStudents.length > 0 ? trainerZoneStudents.map((student, idx) => (
+                        <div key={student.id} className="bg-white p-3 rounded-2xl border border-[#e5e5e5] shadow-sm">
+                          <div className="flex items-center gap-3">
+                            <span className="w-5 text-[12px] font-bold text-[#6b7280]">{idx + 1}</span>
+                            <img src={student.avatar} className="w-10 h-10 rounded-full bg-gray-100" />
+                            <div className="flex-1 min-w-0" onClick={() => setViewedStudentId(student.id)}>
+                              <p className="font-bold text-[14px] text-[#1a1a1a] truncate">{student.name}</p>
+                              <p className="text-[10px] text-[#6b7280]">
+                                Ур. {student.level} • {student.totalXp.toLocaleString()} XP • {student.trainingsCompleted} трен.
+                                {student.streak > 0 && <span className="text-[#ff3b30]"> • {student.streak}🔥</span>}
+                              </p>
+                              <p className="text-[9px] text-[#8e8e93]">{student.city} • {student.branch}</p>
+                            </div>
+                          </div>
+                          <div className="flex gap-2 mt-3 pt-3 border-t border-[#f2f2f7]">
+                            <button 
+                              onClick={() => setTrainerSelectedStudent(student)}
+                              className="flex-1 bg-[#ff3b30]/10 text-[#ff3b30] py-2 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1"
+                            >
+                              <Minus size={14}/> Списать XP
+                            </button>
+                            <button 
+                              onClick={() => { setTrainerSelectedStudent(student); setTrainerXpForm({...trainerXpForm, operation: 'add'}); }}
+                              className="flex-1 bg-[#34c759]/10 text-[#34c759] py-2 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1"
+                            >
+                              <Plus size={14}/> Начислить
+                            </button>
+                            <button 
+                              onClick={() => loadTrainerXpHistory(student.id)}
+                              className="bg-[#8e8e93]/10 text-[#8e8e93] p-2 rounded-xl"
+                            >
+                              <Clock size={16}/>
+                            </button>
+                          </div>
+                        </div>
+                      )) : null}
+                      {(!trainerZoneStudents || trainerZoneStudents.length === 0) && (
+                        <div className="text-center py-8 text-[#6b7280] text-[14px]">
+                          <Users size={32} className="mx-auto mb-2 opacity-30" />
+                          <p>Ученики не найдены</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 )}
              </div>
           )}
@@ -825,6 +1184,7 @@ const App: React.FC = () => {
               onAddBranch={handleAddBranch}
               onRemoveBranch={handleRemoveBranch}
               students={students} skillDefinitions={skillDefinitions}
+              enabledSkillDefinitions={enabledSkillDefinitions}
               onAddSkillDefinition={handleAddSkill}
               enabledSkills={enabledSkills}
               onToggleSkill={handleToggleSkill}
@@ -843,6 +1203,25 @@ const App: React.FC = () => {
               }}
               onRevokeAchievement={async (userId, achievementId) => {
                 await api.revokeAchievement(userId, achievementId);
+                await refreshData();
+              }}
+              onUpdateStudentRole={async (userId, role) => {
+                await api.updateUserRole(userId, role);
+                await refreshData();
+              }}
+              onAwardXp={async (userId, xpAmount, skillId, reason) => {
+                await api.awardXp(userId, xpAmount, skillId, reason);
+                await refreshData();
+              }}
+              onDeductXp={async (userId, xpAmount, skillId, reason) => {
+                await api.deductXp(userId, xpAmount, skillId, reason);
+                await refreshData();
+              }}
+              onGetXpHistory={async (userId) => {
+                return await api.getXpHistory(userId);
+              }}
+              onUpdateTrainerAssignment={async (userId, assignedCity, assignedBranch) => {
+                await api.updateTrainerAssignment(userId, assignedCity, assignedBranch);
                 await refreshData();
               }}
             />

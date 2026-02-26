@@ -1,18 +1,50 @@
-import { User, AchievementCriteria, SkillDefinition, QRCodeDefinition, XPConfig } from '../types';
+import { User, AchievementCriteria, SkillDefinition, QRCodeDefinition, XPConfig, XpHistoryEntry } from '../types';
 
 const API_BASE = '/api';
 
+// Get Telegram initData
+function getTelegramInitData(): string | null {
+  const tg = (window as any).Telegram?.WebApp;
+  if (!tg) {
+    // Development mode: return null, server will use mock user
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      return null;
+    }
+    return null;
+  }
+  return tg.initData || null;
+}
+
 // Helper for API calls
 async function apiCall<T>(endpoint: string, options?: RequestInit): Promise<T> {
+  const initData = getTelegramInitData();
+  
+  const headers: HeadersInit = {
+    'Content-Type': 'application/json',
+    ...options?.headers,
+  };
+
+  // Add Telegram initData to headers if available
+  if (initData) {
+    headers['X-Telegram-Init-Data'] = initData;
+  }
+
   const response = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
+    headers,
   });
 
   if (!response.ok) {
+    // Handle 401/403 specifically
+    if (response.status === 401) {
+      const error = await response.json().catch(() => ({ error: 'Authentication required' }));
+      throw new Error(error.error || 'Необходима авторизация через Telegram');
+    }
+    if (response.status === 403) {
+      const error = await response.json().catch(() => ({ error: 'Insufficient permissions' }));
+      throw new Error(error.error || 'Недостаточно прав доступа');
+    }
+    
     const error = await response.json().catch(() => ({ error: 'Request failed' }));
     throw new Error(error.error || 'Request failed');
   }
@@ -25,7 +57,7 @@ function getTelegramUser() {
   const tg = (window as any).Telegram?.WebApp;
   const user = tg?.initDataUnsafe?.user;
   
-  // If no Telegram user, use mock for local testing
+  // If no Telegram user, use mock for local testing only
   if (!user && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
     return {
       id: 123456789,
@@ -42,24 +74,37 @@ function getTelegramUser() {
 
 export async function getCurrentUser(): Promise<User | null> {
   const tgUser = getTelegramUser();
-  if (!tgUser) return null;
+  if (!tgUser) {
+    // In production, require Telegram
+    if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      throw new Error('Откройте приложение через Telegram');
+    }
+    return null;
+  }
 
   try {
-    return await apiCall<User>(`/users/me?telegram_id=${tgUser.id}`);
-  } catch (error) {
+    return await apiCall<User>('/users/me');
+  } catch (error: any) {
     // User not found, register
-    return registerUser();
+    if (error.message?.includes('not found')) {
+      return registerUser();
+    }
+    throw error;
   }
 }
 
 export async function registerUser(): Promise<User | null> {
   const tgUser = getTelegramUser();
-  if (!tgUser) return null;
+  if (!tgUser) {
+    if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      throw new Error('Откройте приложение через Telegram');
+    }
+    return null;
+  }
 
   return apiCall<User>('/users/register', {
     method: 'POST',
     body: JSON.stringify({
-      telegramId: tgUser.id.toString(),
       name: [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ') || 'Player',
       avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${tgUser.id}`,
     }),
@@ -77,11 +122,43 @@ export async function getUserById(id: string): Promise<User> {
 export async function awardXp(
   userId: string,
   xpAmount: number,
-  skillId?: string
+  skillId?: string,
+  reason?: string
 ): Promise<{ user: User; xpAwarded: number; weekendBonus: boolean; newAchievements: AchievementCriteria[] }> {
   return apiCall('/users/award-xp', {
     method: 'POST',
-    body: JSON.stringify({ userId, xpAmount, skillId }),
+    body: JSON.stringify({ userId, xpAmount, skillId, reason }),
+  });
+}
+
+export async function deductXp(
+  userId: string,
+  xpAmount: number,
+  skillId?: string,
+  reason?: string
+): Promise<{ user: User; xpDeducted: number; newAchievements: AchievementCriteria[] }> {
+  return apiCall('/users/deduct-xp', {
+    method: 'POST',
+    body: JSON.stringify({ userId, xpAmount, skillId, reason }),
+  });
+}
+
+export async function getXpHistory(userId: string): Promise<XpHistoryEntry[]> {
+  return apiCall<XpHistoryEntry[]>(`/users/${userId}/xp-history`);
+}
+
+export async function getZoneStudents(): Promise<User[]> {
+  return apiCall<User[]>('/users/zone/students');
+}
+
+export async function updateTrainerAssignment(
+  userId: string,
+  assignedCity: string | null,
+  assignedBranch: string | null
+): Promise<User> {
+  return apiCall(`/users/${userId}/assignment`, {
+    method: 'PUT',
+    body: JSON.stringify({ assignedCity, assignedBranch }),
   });
 }
 
@@ -103,12 +180,11 @@ export async function logTraining(
 }
 
 export async function scanQR(
-  userId: string,
   qrId: string
 ): Promise<{ user: User; qr: any; xpAwarded: number; weekendBonus: boolean; newAchievements: AchievementCriteria[] }> {
   return apiCall('/users/scan-qr', {
     method: 'POST',
-    body: JSON.stringify({ userId, qrId }),
+    body: JSON.stringify({ qrId }),
   });
 }
 

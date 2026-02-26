@@ -1,10 +1,11 @@
 
 import React, { useState, useMemo } from 'react';
-import { User, UserRole, XPConfig, AchievementCriteria, Skills, AchievementConditions, SkillDefinition, QRCodeDefinition } from '../types';
+import { User, UserRole, XPConfig, AchievementCriteria, Skills, AchievementConditions, SkillDefinition, QRCodeDefinition, XpHistoryEntry } from '../types';
 import { 
   Settings, Award, Users, MapPin, Plus, Trash2, Edit2, Check, 
   Image as ImageIcon, Target, Flame, Star, Zap, BarChart3, TrendingUp, PieChart,
-  ChevronDown, ChevronRight, Building, ToggleLeft, ToggleRight, Save, X, QrCode, Download, Printer
+  ChevronDown, ChevronRight, Building, ToggleLeft, ToggleRight, Save, X, QrCode, Download, Printer,
+  Shield, Clock, History, Minus
 } from 'lucide-react';
 
 interface AdminPanelProps {
@@ -23,6 +24,7 @@ interface AdminPanelProps {
   onRemoveBranch: (city: string, branch: string) => void;
   students: User[];
   skillDefinitions: SkillDefinition[];
+  enabledSkillDefinitions: SkillDefinition[];
   onAddSkillDefinition: (label: string) => void;
   enabledSkills: string[];
   onToggleSkill: (skillId: string) => void;
@@ -34,6 +36,11 @@ interface AdminPanelProps {
   onUpdateStudentStats?: (userId: string, stats: { xp?: number; totalXp?: number; level?: number; trainingsCompleted?: number; streak?: number }) => Promise<void>;
   onGrantAchievement?: (userId: string, achievementId: string) => Promise<void>;
   onRevokeAchievement?: (userId: string, achievementId: string) => Promise<void>;
+  onUpdateStudentRole?: (userId: string, role: string) => Promise<void>;
+  onAwardXp?: (userId: string, xpAmount: number, skillId?: string, reason?: string) => Promise<void>;
+  onDeductXp?: (userId: string, xpAmount: number, skillId?: string, reason?: string) => Promise<void>;
+  onGetXpHistory?: (userId: string) => Promise<XpHistoryEntry[]>;
+  onUpdateTrainerAssignment?: (userId: string, assignedCity: string | null, assignedBranch: string | null) => Promise<void>;
 }
 
 const AdminPanel: React.FC<AdminPanelProps> = ({
@@ -41,10 +48,11 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
   achievements, onAddAchievement, onUpdateAchievement, onRemoveAchievement,
   cityBranches, onAddCity, onRemoveCity, onAddBranch, onRemoveBranch,
   students,
-  skillDefinitions, onAddSkillDefinition,
+  skillDefinitions, enabledSkillDefinitions, onAddSkillDefinition,
   enabledSkills, onToggleSkill,
   qrCodes, onAddQR, onRemoveQR,
-  onUpdateStudentProfile, onUpdateStudentStats, onGrantAchievement, onRevokeAchievement
+  onUpdateStudentProfile, onUpdateStudentStats, onGrantAchievement, onRevokeAchievement,
+  onUpdateStudentRole, onAwardXp, onDeductXp, onGetXpHistory, onUpdateTrainerAssignment
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'stats' | 'xp' | 'achievements' | 'locations' | 'skills_mgmt' | 'qr' | 'students'>('stats');
   
@@ -60,14 +68,36 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
   const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
   const [showQRModal, setShowQRModal] = useState<string | null>(null);
 
-  // Training presets for QR generation
-  const trainingPresets = [
+  // Dynamic training presets - stored in localStorage
+  type TrainingPreset = { name: string; skills: { skillId: string; xpAmount: number }[] };
+  const PRESETS_KEY = 'volleylevel_training_presets';
+  
+  const defaultPresets: TrainingPreset[] = [
     { name: 'Атака + Блок', skills: [{skillId: 'attack', xpAmount: 15}, {skillId: 'block', xpAmount: 15}] },
     { name: 'Прием + Пас', skills: [{skillId: 'receive', xpAmount: 15}, {skillId: 'set', xpAmount: 15}] },
     { name: 'Подача', skills: [{skillId: 'serve', xpAmount: 25}] },
     { name: 'Физподготовка', skills: [{skillId: 'stamina', xpAmount: 30}] },
     { name: 'Комплексная', skills: [{skillId: 'attack', xpAmount: 10}, {skillId: 'receive', xpAmount: 10}, {skillId: 'serve', xpAmount: 10}] },
   ];
+  
+  const [customPresets, setCustomPresets] = useState<TrainingPreset[]>(() => {
+    try {
+      const saved = localStorage.getItem(PRESETS_KEY);
+      return saved ? JSON.parse(saved) : defaultPresets;
+    } catch { return defaultPresets; }
+  });
+  const [showPresetEditor, setShowPresetEditor] = useState(false);
+  const [editingPresetIdx, setEditingPresetIdx] = useState<number | null>(null);
+  const [presetForm, setPresetForm] = useState<TrainingPreset>({ name: '', skills: [{ skillId: '', xpAmount: 10 }] });
+
+  const savePresets = (presets: TrainingPreset[]) => {
+    setCustomPresets(presets);
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+  };
+
+  const trainingPresets = useMemo(() => {
+    return customPresets.filter(p => p.skills.every(s => enabledSkills.includes(s.skillId)));
+  }, [customPresets, enabledSkills]);
 
   const [achForm, setAchForm] = useState({ 
     title: '', description: '', imageUrl: '', minLevel: 0, minTrainings: 0, minStreak: 0, minTotalXp: 0, skillLimit: '', skillValue: 0
@@ -100,11 +130,23 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
   };
 
   // Student management state
-  const [studentFilter, setStudentFilter] = useState({ city: '', branch: '', search: '' });
+  const [studentFilter, setStudentFilter] = useState({ 
+    city: '', branch: '', search: '', 
+    minLevel: '', maxLevel: '', 
+    minTrainings: '', maxTrainings: '',
+    minStreak: '', maxStreak: '',
+    minXp: '', maxXp: '',
+    role: ''
+  });
   const [selectedStudent, setSelectedStudent] = useState<User | null>(null);
-  const [studentEditMode, setStudentEditMode] = useState<'profile' | 'stats' | 'achievements' | null>(null);
+  const [studentEditMode, setStudentEditMode] = useState<'profile' | 'stats' | 'achievements' | 'role' | 'xp' | 'history' | 'assignment' | null>(null);
   const [studentStatsForm, setStudentStatsForm] = useState({ xp: 0, totalXp: 0, level: 1, trainingsCompleted: 0, streak: 0 });
+  const [studentProfileForm, setStudentProfileForm] = useState({ name: '', avatar: '', city: '', branch: '' });
+  const [xpOperationForm, setXpOperationForm] = useState({ amount: 100, skillId: '', operation: 'add' as 'add' | 'deduct', reason: '' });
   const [savingStudent, setSavingStudent] = useState(false);
+  const [xpHistory, setXpHistory] = useState<XpHistoryEntry[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [trainerAssignForm, setTrainerAssignForm] = useState({ city: '', branch: '' });
 
   // Filter students
   const filteredStudents = useMemo(() => {
@@ -112,11 +154,20 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
       if (studentFilter.city && s.city !== studentFilter.city) return false;
       if (studentFilter.branch && s.branch !== studentFilter.branch) return false;
       if (studentFilter.search && !s.name.toLowerCase().includes(studentFilter.search.toLowerCase())) return false;
+      if (studentFilter.minLevel && s.level < Number(studentFilter.minLevel)) return false;
+      if (studentFilter.maxLevel && s.level > Number(studentFilter.maxLevel)) return false;
+      if (studentFilter.minTrainings && s.trainingsCompleted < Number(studentFilter.minTrainings)) return false;
+      if (studentFilter.maxTrainings && s.trainingsCompleted > Number(studentFilter.maxTrainings)) return false;
+      if (studentFilter.minStreak && s.streak < Number(studentFilter.minStreak)) return false;
+      if (studentFilter.maxStreak && s.streak > Number(studentFilter.maxStreak)) return false;
+      if (studentFilter.minXp && s.totalXp < Number(studentFilter.minXp)) return false;
+      if (studentFilter.maxXp && s.totalXp > Number(studentFilter.maxXp)) return false;
+      if (studentFilter.role && s.role !== studentFilter.role) return false;
       return true;
     }).sort((a, b) => b.totalXp - a.totalXp);
   }, [students, studentFilter]);
 
-  const openStudentEdit = (student: User, mode: 'profile' | 'stats' | 'achievements') => {
+  const openStudentEdit = (student: User, mode: 'profile' | 'stats' | 'achievements' | 'role' | 'xp' | 'history' | 'assignment') => {
     setSelectedStudent(student);
     setStudentEditMode(mode);
     if (mode === 'stats') {
@@ -126,6 +177,30 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
         level: student.level,
         trainingsCompleted: student.trainingsCompleted,
         streak: student.streak
+      });
+    }
+    if (mode === 'profile') {
+      setStudentProfileForm({
+        name: student.name,
+        avatar: student.avatar || '',
+        city: student.city,
+        branch: student.branch
+      });
+    }
+    if (mode === 'xp') {
+      setXpOperationForm({ amount: 100, skillId: '', operation: 'add', reason: '' });
+    }
+    if (mode === 'history' && onGetXpHistory) {
+      setLoadingHistory(true);
+      onGetXpHistory(student.id).then(h => {
+        setXpHistory(h);
+        setLoadingHistory(false);
+      }).catch(() => setLoadingHistory(false));
+    }
+    if (mode === 'assignment') {
+      setTrainerAssignForm({
+        city: student.assignedCity || student.city || '',
+        branch: student.assignedBranch || ''
       });
     }
   };
@@ -174,6 +249,78 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
     }
   };
 
+  const handleSaveStudentProfile = async () => {
+    if (!selectedStudent || !onUpdateStudentProfile) return;
+    setSavingStudent(true);
+    try {
+      await onUpdateStudentProfile(selectedStudent.id, studentProfileForm);
+      closeStudentEdit();
+    } catch (err) {
+      console.error('Save profile error:', err);
+      alert('Ошибка сохранения');
+    } finally {
+      setSavingStudent(false);
+    }
+  };
+
+  const handleXpOperation = async () => {
+    if (!selectedStudent || !onAwardXp || !onDeductXp) return;
+    if (!xpOperationForm.amount || xpOperationForm.amount <= 0) {
+      alert('Укажите количество XP');
+      return;
+    }
+    setSavingStudent(true);
+    try {
+      if (xpOperationForm.operation === 'add') {
+        await onAwardXp(selectedStudent.id, xpOperationForm.amount, xpOperationForm.skillId || undefined, xpOperationForm.reason || undefined);
+        alert(`Начислено ${xpOperationForm.amount} XP`);
+      } else {
+        await onDeductXp(selectedStudent.id, xpOperationForm.amount, xpOperationForm.skillId || undefined, xpOperationForm.reason || undefined);
+        alert(`Списано ${xpOperationForm.amount} XP`);
+      }
+      closeStudentEdit();
+    } catch (err: any) {
+      console.error('XP operation error:', err);
+      alert(err.message || 'Ошибка операции');
+    } finally {
+      setSavingStudent(false);
+    }
+  };
+
+  const handleSaveTrainerAssignment = async () => {
+    if (!selectedStudent || !onUpdateTrainerAssignment) return;
+    setSavingStudent(true);
+    try {
+      await onUpdateTrainerAssignment(
+        selectedStudent.id, 
+        trainerAssignForm.city || null, 
+        trainerAssignForm.branch || null
+      );
+      alert('Назначение сохранено');
+      closeStudentEdit();
+    } catch (err: any) {
+      console.error('Save assignment error:', err);
+      alert(err.message || 'Ошибка сохранения');
+    } finally {
+      setSavingStudent(false);
+    }
+  };
+
+  const handleUpdateRole = async (role: string) => {
+    if (!selectedStudent || !onUpdateStudentRole) return;
+    setSavingStudent(true);
+    try {
+      await onUpdateStudentRole(selectedStudent.id, role);
+      setSelectedStudent(prev => prev ? { ...prev, role: role as any } : null);
+      closeStudentEdit();
+    } catch (err: any) {
+      console.error('Update role error:', err);
+      alert(err.message || 'Ошибка изменения роли');
+    } finally {
+      setSavingStudent(false);
+    }
+  };
+
   const stats = useMemo(() => {
     const totalStudents = students.length;
     const totalXp = students.reduce((acc, s) => acc + s.totalXp, 0);
@@ -197,7 +344,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
 
     // If using a preset
     const preset = selectedPreset ? trainingPresets.find(p => p.name === selectedPreset) : null;
-    const title = preset ? preset.name : qrForm.title;
+    const title = qrForm.title || (preset ? preset.name : '');
 
     if (!title) return;
 
@@ -308,7 +455,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
 
           <div className="ios-section-title px-0">Рейтинг филиалов</div>
           <div className="ios-list-group mx-0">
-            {Object.entries(stats.branchStats).sort((a,b) => b[1].xp - a[1].xp).map(([key, data]) => (
+            {(Object.entries(stats.branchStats) as [string, { xp: number; count: number; city: string }][]).sort((a,b) => b[1].xp - a[1].xp).map(([key, data]) => (
               <div key={key} className="ios-list-item">
                 <div className="flex flex-col">
                   <span className="font-bold text-[15px] text-[#1a1a1a]">{key.split(':')[1]}</span>
@@ -340,7 +487,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
           </div>
 
           <div className="ios-section-title px-0 mt-6">Города и филиалы</div>
-          {Object.entries(cityBranches).map(([city, branches]) => (
+          {(Object.entries(cityBranches) as [string, string[]][]).map(([city, branches]) => (
             <div key={city} className="bg-white rounded-3xl p-4 shadow-sm border border-[#e5e5e5] space-y-4">
               <div className="flex justify-between items-center border-b border-[#f2f2f7] pb-3">
                 <div className="flex items-center gap-2">
@@ -440,9 +587,146 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
           
           {/* Training preset selection */}
           <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-4 rounded-2xl border border-blue-100">
-            <p className="text-[12px] text-blue-700 font-medium mb-3">
-              Выберите тип тренировки для генерации QR-кода, который ученики смогут сканировать:
-            </p>
+            <div className="flex justify-between items-center mb-3">
+              <p className="text-[12px] text-blue-700 font-medium">
+                Выберите тип тренировки:
+              </p>
+              <button
+                onClick={() => { setShowPresetEditor(!showPresetEditor); setEditingPresetIdx(null); setPresetForm({ name: '', skills: [{ skillId: enabledSkillDefinitions[0]?.id || '', xpAmount: 10 }] }); }}
+                className="text-[11px] text-blue-600 font-bold bg-white/80 px-2 py-1 rounded-lg border border-blue-200"
+              >
+                {showPresetEditor ? '✕ Закрыть' : '⚙ Настроить типы'}
+              </button>
+            </div>
+
+            {/* Preset editor */}
+            {showPresetEditor && (
+              <div className="mb-4 space-y-3 bg-white/70 p-3 rounded-xl border border-blue-200">
+                <div className="text-[12px] font-bold text-blue-800">
+                  {editingPresetIdx !== null ? 'Редактировать тип' : 'Новый тип тренировки'}
+                </div>
+                <input
+                  placeholder="Название (например, Атака + Блок)"
+                  className="w-full bg-white p-2.5 rounded-lg border border-[#e5e5e5] outline-none text-[13px]"
+                  value={presetForm.name}
+                  onChange={e => setPresetForm({ ...presetForm, name: e.target.value })}
+                />
+                <div className="text-[11px] text-[#6b7280] font-medium">Навыки и XP:</div>
+                {presetForm.skills.map((skill, si) => (
+                  <div key={si} className="flex gap-2 items-center">
+                    <select
+                      className="flex-1 bg-white p-2 rounded-lg border border-[#e5e5e5] outline-none text-[12px]"
+                      value={skill.skillId}
+                      onChange={e => {
+                        const updated = [...presetForm.skills];
+                        updated[si] = { ...updated[si], skillId: e.target.value };
+                        setPresetForm({ ...presetForm, skills: updated });
+                      }}
+                    >
+                      <option value="">Выберите навык</option>
+                      {enabledSkillDefinitions.map(d => <option key={d.id} value={d.id}>{d.label}</option>)}
+                    </select>
+                    <input
+                      type="number"
+                      placeholder="XP"
+                      className="w-16 bg-white p-2 rounded-lg border border-[#e5e5e5] outline-none text-[12px] text-center"
+                      value={skill.xpAmount}
+                      onChange={e => {
+                        const updated = [...presetForm.skills];
+                        updated[si] = { ...updated[si], xpAmount: Number(e.target.value) || 0 };
+                        setPresetForm({ ...presetForm, skills: updated });
+                      }}
+                    />
+                    {presetForm.skills.length > 1 && (
+                      <button
+                        onClick={() => setPresetForm({ ...presetForm, skills: presetForm.skills.filter((_, i) => i !== si) })}
+                        className="text-[#ff3b30] p-1"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+                <button
+                  onClick={() => setPresetForm({ ...presetForm, skills: [...presetForm.skills, { skillId: enabledSkillDefinitions[0]?.id || '', xpAmount: 10 }] })}
+                  className="text-[11px] text-[#007aff] font-bold flex items-center gap-1"
+                >
+                  <Plus size={12} /> Добавить навык
+                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      if (!presetForm.name || presetForm.skills.some(s => !s.skillId || s.xpAmount <= 0)) {
+                        alert('Заполните название и все навыки');
+                        return;
+                      }
+                      const updated = [...customPresets];
+                      if (editingPresetIdx !== null) {
+                        updated[editingPresetIdx] = presetForm;
+                      } else {
+                        updated.push(presetForm);
+                      }
+                      savePresets(updated);
+                      setPresetForm({ name: '', skills: [{ skillId: enabledSkillDefinitions[0]?.id || '', xpAmount: 10 }] });
+                      setEditingPresetIdx(null);
+                    }}
+                    className="flex-1 bg-[#007aff] text-white py-2 rounded-xl text-[12px] font-bold"
+                  >
+                    {editingPresetIdx !== null ? 'Сохранить' : 'Добавить тип'}
+                  </button>
+                  {editingPresetIdx !== null && (
+                    <button
+                      onClick={() => { setEditingPresetIdx(null); setPresetForm({ name: '', skills: [{ skillId: enabledSkillDefinitions[0]?.id || '', xpAmount: 10 }] }); }}
+                      className="bg-[#f2f2f7] text-[#6b7280] py-2 px-4 rounded-xl text-[12px] font-bold"
+                    >
+                      Отмена
+                    </button>
+                  )}
+                </div>
+
+                {/* Existing presets list */}
+                <div className="border-t border-blue-200 pt-3 mt-2 space-y-2">
+                  <div className="text-[11px] font-bold text-blue-800">Текущие типы тренировок:</div>
+                  {customPresets.map((p, idx) => {
+                    const allEnabled = p.skills.every(s => enabledSkills.includes(s.skillId));
+                    return (
+                      <div key={idx} className={`flex items-center gap-2 p-2 rounded-lg ${allEnabled ? 'bg-white' : 'bg-gray-100 opacity-60'}`}>
+                        <div className="flex-1 min-w-0">
+                          <span className="text-[12px] font-bold text-[#1a1a1a] truncate block">{p.name}</span>
+                          <span className="text-[10px] text-[#6b7280]">
+                            {p.skills.map(s => `${skillDefinitions.find(d => d.id === s.skillId)?.label || s.skillId}: +${s.xpAmount}`).join(' • ')}
+                            {!allEnabled && ' (навыки выключены)'}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => { setEditingPresetIdx(idx); setPresetForm({ ...p }); }}
+                          className="text-[#007aff] p-1"
+                        >
+                          <Edit2 size={14} />
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (confirm(`Удалить "${p.name}"?`)) {
+                              const updated = customPresets.filter((_, i) => i !== idx);
+                              savePresets(updated);
+                              if (selectedPreset === p.name) setSelectedPreset(null);
+                            }
+                          }}
+                          className="text-[#ff3b30] p-1"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {customPresets.length === 0 && (
+                    <p className="text-[11px] text-[#8e8e93] text-center py-2">Нет настроенных типов</p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Preset buttons */}
             <div className="flex flex-wrap gap-2">
               {trainingPresets.map(preset => (
                 <button
@@ -460,6 +744,9 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
                   </span>
                 </button>
               ))}
+              {trainingPresets.length === 0 && (
+                <p className="text-[11px] text-[#8e8e93]">Нет доступных типов. Нажмите "Настроить типы" чтобы добавить.</p>
+              )}
             </div>
             {selectedPreset && (
               <div className="mt-3 p-2 bg-white/60 rounded-xl">
@@ -496,6 +783,15 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
           <div className="ios-section-title px-0">Настройки (опционально)</div>
           <div className="ios-list-group mx-0">
             <div className="ios-list-item">
+              <span className="text-[#1a1a1a]">Заголовок</span>
+              <input 
+                placeholder={selectedPreset || "Введите заголовок"}
+                className="text-right flex-1 outline-none text-[#007aff] font-bold" 
+                value={qrForm.title} 
+                onChange={e => setQrForm({...qrForm, title: e.target.value})}
+              />
+            </div>
+            <div className="ios-list-item">
               <span className="text-[#1a1a1a]">Макс. сканирований</span>
               <input 
                 type="number" 
@@ -515,16 +811,6 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
                 onChange={e => setQrForm({...qrForm, expiresIn: e.target.value})}
               />
             </div>
-            {!selectedPreset && (
-              <div className="ios-list-item">
-                <input 
-                  placeholder="Или введите свой заголовок" 
-                  className="w-full outline-none bg-transparent text-[#1a1a1a]" 
-                  value={qrForm.title} 
-                  onChange={e => setQrForm({...qrForm, title: e.target.value})}
-                />
-              </div>
-            )}
           </div>
 
           <button 
@@ -558,9 +844,17 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
                         <span className="bg-[#34c759]/10 text-[#34c759] px-2 py-0.5 rounded-full text-[10px] font-bold">
                           +{qr.xpAmount} XP
                         </span>
-                        {qr.skills && (
+                        {qr.skills && qr.skills.map((s, si) => {
+                          const skill = skillDefinitions.find(d => d.id === s.skillId);
+                          return (
+                            <span key={si} className="bg-[#007aff]/10 text-[#007aff] px-2 py-0.5 rounded-full text-[10px] font-bold">
+                              {skill?.label || s.skillId}: +{s.xpAmount}
+                            </span>
+                          );
+                        })}
+                        {!qr.skills && qr.skillId && (
                           <span className="bg-[#007aff]/10 text-[#007aff] px-2 py-0.5 rounded-full text-[10px] font-bold">
-                            {qr.skills.length} навыков
+                            {skillDefinitions.find(d => d.id === qr.skillId)?.label || qr.skillId}
                           </span>
                         )}
                         {qr.maxUses && (
@@ -826,6 +1120,249 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
                   </div>
                 )}
 
+                {/* Profile Edit Mode */}
+                {studentEditMode === 'profile' && (
+                  <div className="space-y-4">
+                    <div className="ios-section-title px-0">Редактировать профиль</div>
+                    <div className="ios-list-group mx-0">
+                      <div className="ios-list-item">
+                        <span className="text-[#1a1a1a]">Имя</span>
+                        <input 
+                          type="text" 
+                          className="text-right w-40 outline-none text-[#007aff] font-bold" 
+                          value={studentProfileForm.name} 
+                          onChange={e => setStudentProfileForm({...studentProfileForm, name: e.target.value})}
+                        />
+                      </div>
+                      <div className="ios-list-item">
+                        <span className="text-[#1a1a1a]">URL фото</span>
+                        <input 
+                          type="text" 
+                          className="text-right w-48 outline-none text-[#007aff] font-bold text-[12px]" 
+                          value={studentProfileForm.avatar} 
+                          onChange={e => setStudentProfileForm({...studentProfileForm, avatar: e.target.value})}
+                          placeholder="https://..."
+                        />
+                      </div>
+                      <div className="ios-list-item">
+                        <span className="text-[#1a1a1a]">Город</span>
+                        <select 
+                          className="bg-transparent outline-none text-[#007aff] font-bold" 
+                          value={studentProfileForm.city} 
+                          onChange={e => setStudentProfileForm({...studentProfileForm, city: e.target.value, branch: ''})}
+                        >
+                          {Object.keys(cityBranches).map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </div>
+                      <div className="ios-list-item">
+                        <span className="text-[#1a1a1a]">Филиал</span>
+                        <select 
+                          className="bg-transparent outline-none text-[#007aff] font-bold" 
+                          value={studentProfileForm.branch} 
+                          onChange={e => setStudentProfileForm({...studentProfileForm, branch: e.target.value})}
+                          disabled={!studentProfileForm.city}
+                        >
+                          <option value="">Выберите</option>
+                          {studentProfileForm.city && cityBranches[studentProfileForm.city]?.map(b => <option key={b} value={b}>{b}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    {studentProfileForm.avatar && (
+                      <div className="flex justify-center">
+                        <img src={studentProfileForm.avatar} className="w-20 h-20 rounded-full bg-gray-100" alt="Preview" />
+                      </div>
+                    )}
+                    <button onClick={handleSaveStudentProfile} disabled={savingStudent} className="w-full bg-[#007aff] text-white py-4 rounded-2xl font-bold active-scale disabled:opacity-50">
+                      {savingStudent ? 'Сохранение...' : 'Сохранить'}
+                    </button>
+                  </div>
+                )}
+
+                {/* Role Edit Mode */}
+                {studentEditMode === 'role' && (
+                  <div className="space-y-4">
+                    <div className="ios-section-title px-0">Изменить роль</div>
+                    <div className="space-y-2">
+                      {['STUDENT', 'TRAINER', 'ADMIN'].map(role => (
+                        <button
+                          key={role}
+                          onClick={() => handleUpdateRole(role)}
+                          disabled={savingStudent || selectedStudent.role === role}
+                          className={`w-full p-4 rounded-2xl border-2 font-bold text-[14px] transition-all ${
+                            selectedStudent.role === role
+                              ? 'bg-[#007aff] text-white border-[#007aff]'
+                              : 'bg-white text-[#1a1a1a] border-[#e5e5e5] active-scale'
+                          } disabled:opacity-50`}
+                        >
+                          {role === 'STUDENT' ? 'Ученик' : role === 'TRAINER' ? 'Тренер' : 'Администратор'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* XP Operation Mode */}
+                {studentEditMode === 'xp' && (
+                  <div className="space-y-4">
+                    <div className="ios-section-title px-0">Операция с XP</div>
+                    <div className="ios-list-group mx-0">
+                      <div className="ios-list-item">
+                        <span className="text-[#1a1a1a]">Операция</span>
+                        <select 
+                          className="bg-transparent outline-none text-[#007aff] font-bold" 
+                          value={xpOperationForm.operation} 
+                          onChange={e => setXpOperationForm({...xpOperationForm, operation: e.target.value as 'add' | 'deduct'})}
+                        >
+                          <option value="add">Начислить</option>
+                          <option value="deduct">Списать</option>
+                        </select>
+                      </div>
+                      <div className="ios-list-item">
+                        <span className="text-[#1a1a1a]">Количество XP</span>
+                        <input 
+                          type="number" 
+                          min="1" 
+                          className="text-right w-24 outline-none text-[#007aff] font-bold" 
+                          value={xpOperationForm.amount} 
+                          onChange={e => setXpOperationForm({...xpOperationForm, amount: Number(e.target.value)})}
+                        />
+                      </div>
+                      <div className="ios-list-item">
+                        <span className="text-[#1a1a1a]">Навык (опционально)</span>
+                        <select 
+                          className="bg-transparent outline-none text-[#007aff] font-bold" 
+                          value={xpOperationForm.skillId} 
+                          onChange={e => setXpOperationForm({...xpOperationForm, skillId: e.target.value})}
+                        >
+                          <option value="">Общий XP</option>
+                          {enabledSkillDefinitions.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+                        </select>
+                      </div>
+                      <div className="ios-list-item">
+                        <input 
+                          type="text"
+                          placeholder="Причина (опционально)"
+                          className="w-full outline-none bg-transparent text-[#1a1a1a] text-[14px]" 
+                          value={xpOperationForm.reason} 
+                          onChange={e => setXpOperationForm({...xpOperationForm, reason: e.target.value})}
+                        />
+                      </div>
+                    </div>
+                    {xpOperationForm.operation === 'deduct' && (
+                      <p className="text-[11px] text-[#ff3b30] bg-[#ff3b30]/10 p-3 rounded-xl">
+                        ⚠️ Вычитание XP уменьшит общий опыт ученика. Операция будет записана в историю.
+                      </p>
+                    )}
+                    <button 
+                      onClick={handleXpOperation} 
+                      disabled={savingStudent} 
+                      className={`w-full py-4 rounded-2xl font-bold active-scale disabled:opacity-50 ${
+                        xpOperationForm.operation === 'deduct' 
+                          ? 'bg-[#ff3b30] text-white' 
+                          : 'bg-[#007aff] text-white'
+                      }`}
+                    >
+                      {savingStudent ? 'Обработка...' : (xpOperationForm.operation === 'add' ? `Начислить ${xpOperationForm.amount} XP` : `Списать ${xpOperationForm.amount} XP`)}
+                    </button>
+                  </div>
+                )}
+
+                {/* XP History Mode */}
+                {studentEditMode === 'history' && (
+                  <div className="space-y-4">
+                    <div className="ios-section-title px-0">История XP операций</div>
+                    {loadingHistory ? (
+                      <div className="text-center py-8 text-[#8e8e93]">Загрузка...</div>
+                    ) : xpHistory.length === 0 ? (
+                      <div className="text-center py-8 text-[#8e8e93]">
+                        <History size={32} className="mx-auto mb-2 opacity-30" />
+                        <p className="text-[14px]">Нет записей</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2 max-h-[50vh] overflow-y-auto">
+                        {xpHistory.map(h => (
+                          <div key={h.id} className={`p-3 rounded-xl border ${
+                            h.xpEarned < 0 ? 'bg-[#ff3b30]/5 border-[#ff3b30]/20' : 'bg-[#34c759]/5 border-[#34c759]/20'
+                          }`}>
+                            <div className="flex justify-between items-start">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className={`font-bold text-[14px] ${h.xpEarned < 0 ? 'text-[#ff3b30]' : 'text-[#34c759]'}`}>
+                                    {h.xpEarned > 0 ? '+' : ''}{h.xpEarned} XP
+                                  </span>
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#f2f2f7] text-[#6b7280] font-bold">
+                                    {h.source === 'xp_bonus' ? 'Начисление' : 
+                                     h.source === 'xp_deduction' ? 'Списание' :
+                                     h.source === 'training' ? 'Тренировка' :
+                                     h.source === 'preset' ? 'Пресет' :
+                                     h.source === 'qr' ? 'QR' : h.source}
+                                  </span>
+                                </div>
+                                {h.skillFocus && h.skillFocus !== 'general' && (
+                                  <p className="text-[11px] text-[#6b7280] mt-1">
+                                    Навык: {skillDefinitions.find(s => s.id === h.skillFocus)?.label || h.skillFocus}
+                                  </p>
+                                )}
+                                {h.reason && (
+                                  <p className="text-[11px] text-[#374151] mt-1 italic">
+                                    Причина: {h.reason}
+                                  </p>
+                                )}
+                                {h.operatorName && (
+                                  <p className="text-[10px] text-[#8e8e93] mt-1">
+                                    Выполнил: {h.operatorName}
+                                  </p>
+                                )}
+                              </div>
+                              <span className="text-[10px] text-[#8e8e93] whitespace-nowrap ml-2">
+                                {new Date(h.createdAt).toLocaleDateString('ru', { day: '2-digit', month: '2-digit' })}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Trainer Assignment Mode */}
+                {studentEditMode === 'assignment' && (
+                  <div className="space-y-4">
+                    <div className="ios-section-title px-0">Зона ответственности тренера</div>
+                    <p className="text-[11px] text-[#6b7280] bg-[#f2f2f7] p-3 rounded-xl">
+                      Укажите город и филиал, за который отвечает тренер. Тренер сможет начислять и списывать XP только ученикам в своей зоне.
+                    </p>
+                    <div className="ios-list-group mx-0">
+                      <div className="ios-list-item">
+                        <span className="text-[#1a1a1a]">Город</span>
+                        <select 
+                          className="bg-transparent outline-none text-[#007aff] font-bold" 
+                          value={trainerAssignForm.city} 
+                          onChange={e => setTrainerAssignForm({...trainerAssignForm, city: e.target.value, branch: ''})}
+                        >
+                          <option value="">Не назначен</option>
+                          {Object.keys(cityBranches).map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </div>
+                      <div className="ios-list-item">
+                        <span className="text-[#1a1a1a]">Филиал</span>
+                        <select 
+                          className="bg-transparent outline-none text-[#007aff] font-bold" 
+                          value={trainerAssignForm.branch} 
+                          onChange={e => setTrainerAssignForm({...trainerAssignForm, branch: e.target.value})}
+                          disabled={!trainerAssignForm.city}
+                        >
+                          <option value="">Все филиалы в городе</option>
+                          {trainerAssignForm.city && cityBranches[trainerAssignForm.city]?.map(b => <option key={b} value={b}>{b}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    <button onClick={handleSaveTrainerAssignment} disabled={savingStudent} className="w-full bg-[#007aff] text-white py-4 rounded-2xl font-bold active-scale disabled:opacity-50">
+                      {savingStudent ? 'Сохранение...' : 'Сохранить назначение'}
+                    </button>
+                  </div>
+                )}
+
                 {/* Achievements Edit Mode */}
                 {studentEditMode === 'achievements' && (
                   <div className="space-y-4">
@@ -861,30 +1398,61 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
 
           {/* Filters */}
           <div className="ios-section-title px-0">Фильтры</div>
-          <div className="flex gap-2 flex-wrap">
+          <div className="space-y-2">
+            {/* Search */}
             <input 
-              placeholder="Поиск по имени..." 
-              className="flex-1 min-w-[150px] bg-white p-3 rounded-xl border border-[#e5e5e5] outline-none text-[13px] text-[#1a1a1a]"
+              placeholder="🔍 Поиск по имени..." 
+              className="w-full bg-white p-3 rounded-xl border border-[#e5e5e5] outline-none text-[13px] text-[#1a1a1a]"
               value={studentFilter.search}
               onChange={e => setStudentFilter({...studentFilter, search: e.target.value})}
             />
+            {/* Selects row */}
+            <div className="grid grid-cols-2 gap-2">
+              <select 
+                className="w-full bg-white p-2.5 rounded-xl border border-[#e5e5e5] outline-none text-[12px] text-[#007aff]"
+                value={studentFilter.city}
+                onChange={e => setStudentFilter({...studentFilter, city: e.target.value, branch: ''})}
+              >
+                <option value="">Все города</option>
+                {Object.keys(cityBranches).map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <select 
+                className="w-full bg-white p-2.5 rounded-xl border border-[#e5e5e5] outline-none text-[12px] text-[#007aff]"
+                value={studentFilter.branch}
+                onChange={e => setStudentFilter({...studentFilter, branch: e.target.value})}
+                disabled={!studentFilter.city}
+              >
+                <option value="">Все филиалы</option>
+                {studentFilter.city && cityBranches[studentFilter.city]?.map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
+            </div>
             <select 
-              className="bg-white p-3 rounded-xl border border-[#e5e5e5] outline-none text-[13px] text-[#007aff]"
-              value={studentFilter.city}
-              onChange={e => setStudentFilter({...studentFilter, city: e.target.value, branch: ''})}
+              className="w-full bg-white p-2.5 rounded-xl border border-[#e5e5e5] outline-none text-[12px] text-[#007aff]"
+              value={studentFilter.role}
+              onChange={e => setStudentFilter({...studentFilter, role: e.target.value})}
             >
-              <option value="">Все города</option>
-              {Object.keys(cityBranches).map(c => <option key={c} value={c}>{c}</option>)}
+              <option value="">Все роли</option>
+              <option value="STUDENT">Ученик</option>
+              <option value="TRAINER">Тренер</option>
+              <option value="ADMIN">Админ</option>
             </select>
-            <select 
-              className="bg-white p-3 rounded-xl border border-[#e5e5e5] outline-none text-[13px] text-[#007aff]"
-              value={studentFilter.branch}
-              onChange={e => setStudentFilter({...studentFilter, branch: e.target.value})}
-              disabled={!studentFilter.city}
+            {/* Numeric filters */}
+            <div className="grid grid-cols-2 gap-2 text-[11px]">
+              <input type="number" placeholder="Мин. ур." className="w-full bg-white p-2 rounded-lg border border-[#e5e5e5] outline-none" value={studentFilter.minLevel} onChange={e => setStudentFilter({...studentFilter, minLevel: e.target.value})} />
+              <input type="number" placeholder="Макс. ур." className="w-full bg-white p-2 rounded-lg border border-[#e5e5e5] outline-none" value={studentFilter.maxLevel} onChange={e => setStudentFilter({...studentFilter, maxLevel: e.target.value})} />
+              <input type="number" placeholder="Мин. трен." className="w-full bg-white p-2 rounded-lg border border-[#e5e5e5] outline-none" value={studentFilter.minTrainings} onChange={e => setStudentFilter({...studentFilter, minTrainings: e.target.value})} />
+              <input type="number" placeholder="Макс. трен." className="w-full bg-white p-2 rounded-lg border border-[#e5e5e5] outline-none" value={studentFilter.maxTrainings} onChange={e => setStudentFilter({...studentFilter, maxTrainings: e.target.value})} />
+              <input type="number" placeholder="Мин. стрик" className="w-full bg-white p-2 rounded-lg border border-[#e5e5e5] outline-none" value={studentFilter.minStreak} onChange={e => setStudentFilter({...studentFilter, minStreak: e.target.value})} />
+              <input type="number" placeholder="Макс. стрик" className="w-full bg-white p-2 rounded-lg border border-[#e5e5e5] outline-none" value={studentFilter.maxStreak} onChange={e => setStudentFilter({...studentFilter, maxStreak: e.target.value})} />
+              <input type="number" placeholder="Мин. XP" className="w-full bg-white p-2 rounded-lg border border-[#e5e5e5] outline-none" value={studentFilter.minXp} onChange={e => setStudentFilter({...studentFilter, minXp: e.target.value})} />
+              <input type="number" placeholder="Макс. XP" className="w-full bg-white p-2 rounded-lg border border-[#e5e5e5] outline-none" value={studentFilter.maxXp} onChange={e => setStudentFilter({...studentFilter, maxXp: e.target.value})} />
+            </div>
+            <button 
+              onClick={() => setStudentFilter({ city: '', branch: '', search: '', minLevel: '', maxLevel: '', minTrainings: '', maxTrainings: '', minStreak: '', maxStreak: '', minXp: '', maxXp: '', role: '' })}
+              className="w-full bg-[#f2f2f7] text-[#6b7280] py-2 rounded-xl text-[12px] font-bold"
             >
-              <option value="">Все филиалы</option>
-              {studentFilter.city && cityBranches[studentFilter.city]?.map(b => <option key={b} value={b}>{b}</option>)}
-            </select>
+              Сбросить фильтры
+            </button>
           </div>
 
           {/* Student List */}
@@ -903,19 +1471,52 @@ const AdminPanel: React.FC<AdminPanelProps> = ({
                     </p>
                   </div>
                 </div>
-                <div className="flex gap-2 mt-3 pt-3 border-t border-[#f2f2f7]">
+                <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-[#f2f2f7]">
+                  <button 
+                    onClick={() => openStudentEdit(student, 'profile')}
+                    className="bg-[#34c759]/10 text-[#34c759] py-2 rounded-xl text-[10px] font-bold flex items-center justify-center gap-1"
+                  >
+                    <ImageIcon size={12}/> Профиль
+                  </button>
                   <button 
                     onClick={() => openStudentEdit(student, 'stats')}
-                    className="flex-1 bg-[#007aff]/10 text-[#007aff] py-2 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1"
+                    className="bg-[#007aff]/10 text-[#007aff] py-2 rounded-xl text-[10px] font-bold flex items-center justify-center gap-1"
                   >
-                    <BarChart3 size={12}/> Статистика
+                    <BarChart3 size={12}/> Статы
+                  </button>
+                  <button 
+                    onClick={() => openStudentEdit(student, 'xp')}
+                    className="bg-[#ff9500]/10 text-[#ff9500] py-2 rounded-xl text-[10px] font-bold flex items-center justify-center gap-1"
+                  >
+                    <Zap size={12}/> XP
+                  </button>
+                  <button 
+                    onClick={() => openStudentEdit(student, 'role')}
+                    className="bg-[#5856d6]/10 text-[#5856d6] py-2 rounded-xl text-[10px] font-bold flex items-center justify-center gap-1"
+                  >
+                    <Shield size={12}/> Роль
+                  </button>
+                  <button 
+                    onClick={() => openStudentEdit(student, 'history')}
+                    className="bg-[#8e8e93]/10 text-[#8e8e93] py-2 rounded-xl text-[10px] font-bold flex items-center justify-center gap-1"
+                  >
+                    <Clock size={12}/> История
                   </button>
                   <button 
                     onClick={() => openStudentEdit(student, 'achievements')}
-                    className="flex-1 bg-[#ff9500]/10 text-[#ff9500] py-2 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1"
+                    className="bg-[#ff3b30]/10 text-[#ff3b30] py-2 rounded-xl text-[10px] font-bold flex items-center justify-center gap-1"
                   >
-                    <Award size={12}/> Награды ({student.achievements.length})
+                    <Award size={12}/> Награды
                   </button>
+                  {student.role === 'TRAINER' && (
+                    <button 
+                      onClick={() => openStudentEdit(student, 'assignment')}
+                      className="col-span-3 bg-[#5856d6]/10 text-[#5856d6] py-2 rounded-xl text-[10px] font-bold flex items-center justify-center gap-1"
+                    >
+                      <MapPin size={12}/> Зона: {student.assignedCity || student.city || 'Не назначена'}
+                      {student.assignedBranch && ` / ${student.assignedBranch}`}
+                    </button>
+                  )}
                 </div>
               </div>
             ))}

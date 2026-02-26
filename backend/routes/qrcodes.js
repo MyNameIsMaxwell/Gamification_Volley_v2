@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { requireUser, requireRole } = require('../middleware/telegramAuth');
 
 // Helper to format QR code response
 function formatQR(qr) {
@@ -71,12 +72,15 @@ router.get('/:id', (req, res) => {
   });
 });
 
-// POST /api/qrcodes - Create new QR code
-router.post('/', (req, res) => {
+// POST /api/qrcodes - Create new QR code (admin/trainer only)
+router.post('/', requireRole(['TRAINER', 'ADMIN']), (req, res) => {
   const { title, city, branch, xpAmount, skillId, skills, achievementId, expiresAt, isTrainingPreset, maxUses } = req.body;
 
-  if (!title || !city || !branch) {
-    return res.status(400).json({ error: 'title, city, and branch required' });
+  if (!title || !title.trim()) {
+    return res.status(400).json({ error: 'title is required and cannot be empty' });
+  }
+  if (!city || !branch) {
+    return res.status(400).json({ error: 'city and branch required' });
   }
 
   try {
@@ -114,13 +118,18 @@ router.post('/', (req, res) => {
   }
 });
 
-// PUT /api/qrcodes/:id - Update QR code
-router.put('/:id', (req, res) => {
+// PUT /api/qrcodes/:id - Update QR code (admin/trainer only)
+router.put('/:id', requireRole(['TRAINER', 'ADMIN']), (req, res) => {
   const { title, city, branch, xpAmount, skillId, skills, achievementId, expiresAt, maxUses } = req.body;
 
   const existing = req.db.prepare('SELECT * FROM qr_codes WHERE id = ?').get(req.params.id);
   if (!existing) {
     return res.status(404).json({ error: 'QR code not found' });
+  }
+
+  // Validate title if provided
+  if (title !== undefined && (!title || !title.trim())) {
+    return res.status(400).json({ error: 'title cannot be empty' });
   }
 
   try {
@@ -143,9 +152,9 @@ router.put('/:id', (req, res) => {
         max_uses = ?
       WHERE id = ?
     `).run(
-      title || existing.title,
-      city || existing.city,
-      branch || existing.branch,
+      title !== undefined ? title : existing.title,
+      city !== undefined ? city : existing.city,
+      branch !== undefined ? branch : existing.branch,
       totalXp,
       skillId !== undefined ? skillId : existing.skill_id,
       skills !== undefined ? (skills ? JSON.stringify(skills) : null) : existing.skills_json,
@@ -164,8 +173,8 @@ router.put('/:id', (req, res) => {
   }
 });
 
-// DELETE /api/qrcodes/:id - Delete QR code
-router.delete('/:id', (req, res) => {
+// DELETE /api/qrcodes/:id - Delete QR code (admin/trainer only)
+router.delete('/:id', requireRole(['TRAINER', 'ADMIN']), (req, res) => {
   const existing = req.db.prepare('SELECT * FROM qr_codes WHERE id = ?').get(req.params.id);
   if (!existing) {
     return res.status(404).json({ error: 'QR code not found' });
